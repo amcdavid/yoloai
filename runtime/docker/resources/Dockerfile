@@ -105,14 +105,15 @@ RUN echo 'export PATH="/usr/local/go/bin:$PATH"' > /etc/profile.d/golang.sh
 # the sandbox and wants the current linter set, not yoloAI's release cadence
 # (yoloAI's own `make check` pins it via `go run`). Retry-wrapped because
 # `go install` has no --retry and a proxy hiccup would fail the whole base build.
+# GOCACHE goes to /tmp and is removed: left in $HOME it kept 640 MB of build cache.
 # hadolint ignore=DL3062
 RUN n=0; until [ "$n" -ge 5 ]; do \
-      GOPATH=/tmp/gopath go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest && break; \
+      GOPATH=/tmp/gopath GOCACHE=/tmp/gocache go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest && break; \
       n=$((n+1)); echo "golangci-lint install failed (attempt $n/5); retrying in 5s"; sleep 5; \
     done; \
     [ "$n" -lt 5 ] || { echo "golangci-lint install failed after 5 attempts"; exit 1; }; \
     mv /tmp/gopath/bin/golangci-lint /usr/local/bin/golangci-lint \
-    && rm -rf /tmp/gopath
+    && rm -rf /tmp/gopath /tmp/gocache
 
 # Rust via rustup (installed system-wide)
 ENV RUSTUP_HOME=/usr/local/rustup \
@@ -154,7 +155,8 @@ RUN n=0; until [ "$n" -ge 5 ]; do \
         && npm install -g "opencode-ai@>=1.18.9" && break; \
       n=$((n+1)); echo "npm install failed (attempt $n/5); retrying in 5s"; sleep 5; \
     done; \
-    [ "$n" -lt 5 ] || { echo "npm install failed after 5 attempts"; exit 1; }
+    [ "$n" -lt 5 ] || { echo "npm install failed after 5 attempts"; exit 1; }; \
+    npm cache clean --force 2>/dev/null || true
 # Aider via uv on a bundled Python 3.12. aider-chat pins exact dependency
 # versions and caps requires-python at <3.13, so it cannot install against the
 # base image's system Python (3.13 on trixie) — a plain `pip install` backtracks
