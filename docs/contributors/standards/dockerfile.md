@@ -121,20 +121,34 @@ Caching benefit: a change to the entrypoint script doesn't invalidate the apt-in
 The base image carries everything yoloAI assumes is present in a sandbox:
 
 - **tmux** — session management; every backend uses it.
-- **git** — required for `:copy` mode's git-based diff/apply.
-- **iptables + ipset** — required for `--network-isolated`.
-- **dnsutils** — `dig` for domain resolution in network-isolation entrypoint.
+- **git** — required for `:copy` mode's git-based diff/apply, which runs git *inside* the container.
+- **gosu** — the entrypoint drops root to `yoloai` with it; the name is hardcoded, with no fallback.
+- **python3** — every entrypoint and the status monitor are Python (stdlib only).
+- **iptables + ipset** — required for `--network-isolated`. `ipset` is a soft dependency: `firewall.py` falls back to per-IP iptables rules without it.
 - **sudo** — for the `yoloai` user passwordless escalation.
-- **Standard dev tooling** (build-essential, cmake, clang, python3, curl, jq, ripgrep, fd-find, etc.) — broad coverage so most agents work out-of-box.
-- **Node.js 22 LTS** — for Claude Code, Codex, Gemini CLI installation.
+- **Standard dev tooling** (build-essential, cmake, clang, curl, jq, ripgrep, fd-find, etc.) — broad coverage so most agents work out-of-box.
+- **Node.js 20 LTS** — for Claude Code, Codex, Gemini CLI installation. (Node 22 has syscall incompatibilities with gVisor ARM64 — see the `NODE_MAJOR` ARG in the Dockerfile.)
 - **Docker CE + Compose plugin** — for Docker-in-Docker (D22 `--isolation container-privileged`).
+- **The agent CLIs** — see below.
 
 What does NOT go in the base image:
 
-- **Agent CLIs themselves** — installed at sandbox creation time per agent definition. Otherwise upgrading an agent would require rebuilding the base image.
 - **API keys** — injected at runtime via `/run/secrets/` (`../principles/security-principles.md §6`).
 - **User-specific configs** — handled via `agent_files` seeding mechanism.
 - **Anything per-project** — that's what profile Dockerfiles are for.
+
+**`dnsutils` is present but unused.** This section used to justify it as "`dig` for domain
+resolution in the network-isolation entrypoint". Nothing calls `dig`: `firewall.py` resolves
+allowlisted domains with Python's `socket.getaddrinfo`. It costs ~8 MB and is a candidate for
+removal — left in for now because an agent may use it interactively, which is a judgment call
+about the sandbox's dev-tool surface rather than a yoloAI requirement.
+
+**Agent CLIs are baked into the image, not installed at sandbox creation.** An earlier version
+of this section claimed the opposite. The install is the `npm install -g` layer in the base
+Dockerfile; at create time `sandbox-setup.py` only *checks* for the resolved agent's binary
+(`shutil.which`) and aborts the launch with "run `yoloai system build`" when it is missing.
+This matters because it means the image must be rebuilt to change which agents are available —
+`agent.Definition` carries no install command to do it any other way.
 
 ## Profile Dockerfiles (user-supplied)
 
@@ -148,15 +162,28 @@ Beyond that, the user has full Dockerfile expressiveness. The base image's user 
 
 Profile Dockerfiles are NOT hadolint-checked by yoloAI's CI — they're user-authored. The hadolint discipline is documented as a recommendation in `docs/contributors/design/config.md`.
 
-## Embedded vs bind-mounted resources
+## Embedded resources: baked for container backends, staged for the others
 
-The base image's entrypoint files (`entrypoint.sh`, `entrypoint.py`, status monitor scripts) are *embedded* in the binary and bind-mounted into the container at run time (commit `294679e`, 2026-05-03). This means:
+The entrypoint files (`entrypoint.sh`, `entrypoint.py`, the setup and status-monitor scripts)
+are `//go:embed`ed into the binary (`runtime/docker/resources.go`). How they reach the guest
+differs by backend, and the distinction is easy to get wrong:
 
-- The base image does not need rebuilding when entrypoint scripts change.
-- The same binary running against an older base image gets the updated entrypoint.
-- Resource checksums are tracked (commit `ffe99eb`, 2026-02-24) so the binary can detect user customisations.
+| Backend | Delivery | Consequence |
+| --- | --- | --- |
+| docker, podman, apple, containerd | **Baked** via `COPY` into `/yoloai/bin` at image build | Changing a script **requires a base rebuild** |
+| seatbelt, tart | **Staged** host-side into the sandbox dir (`config.BinDirName`) | No image concept; picked up per sandbox |
 
-This is documented in `docs/contributors/architecture/README.md`; the Dockerfile only needs to provide the *environment* the entrypoints will run in.
+For the container backends this is precisely why `buildInputsChecksum` (`runtime/docker/build.go`)
+hashes all twelve embedded files and stamps the digest onto the image as the
+`yoloai.base.checksum` label: it is what makes a script edit invalidate the base image.
+
+An earlier version of this section claimed the scripts were bind-mounted at run time for every
+backend, and therefore that the base never needed rebuilding when they changed. That is true
+only for seatbelt and tart. If it were true for the container backends, `buildInputsChecksum`
+would have no reason to exist.
+
+The Dockerfile still only needs to provide the *environment* the entrypoints run in — it just
+also carries the entrypoints themselves.
 
 ## ENTRYPOINT vs CMD
 

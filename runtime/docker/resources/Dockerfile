@@ -107,14 +107,20 @@ RUN echo 'export PATH="/usr/local/go/bin:$PATH"' > /etc/profile.d/golang.sh
 # go install has no native retry flag (unlike the curl installs above), so wrap
 # it in a retry loop — a transient Go-proxy hiccup otherwise fails this whole
 # multi-minute base build, which every user's first run performs.
+#
+# GOCACHE is redirected into /tmp and removed with GOPATH. `go install` writes
+# its build cache to $HOME/.cache/go-build by default, which the layer then
+# keeps forever: measured at 640 MB against a 50 MB binary (2026-07-21), all of
+# it dead weight in every sandbox. GOPATH alone was cleaned, so the module cache
+# went and the build cache stayed.
 # hadolint ignore=DL3062
 RUN n=0; until [ "$n" -ge 5 ]; do \
-      GOPATH=/tmp/gopath go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest && break; \
+      GOPATH=/tmp/gopath GOCACHE=/tmp/gocache go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest && break; \
       n=$((n+1)); echo "golangci-lint install failed (attempt $n/5); retrying in 5s"; sleep 5; \
     done; \
     [ "$n" -lt 5 ] || { echo "golangci-lint install failed after 5 attempts"; exit 1; }; \
     mv /tmp/gopath/bin/golangci-lint /usr/local/bin/golangci-lint \
-    && rm -rf /tmp/gopath
+    && rm -rf /tmp/gopath /tmp/gocache
 
 # Rust via rustup (installed system-wide)
 ENV RUSTUP_HOME=/usr/local/rustup \
@@ -130,8 +136,14 @@ RUN echo 'export PATH="/usr/local/cargo/bin:$PATH"' > /etc/profile.d/cargo.sh
 
 # AI coding agents — versions intentionally unpinned; agents must run at
 # current versions to function correctly with their respective APIs.
-# Claude Code via npm (not native binary — native bundles Bun which ignores
-# proxy env vars and auto-updates; see docs/dev/research/implementation.md)
+# Claude Code via npm, NOT the native installer. The native build bundles Bun,
+# which ignores proxy env vars and auto-updates — both disqualifying here: the
+# egress-proxy credential broker (D105/D106) needs the agent to honour
+# HTTPS_PROXY, and an auto-updating binary defeats the image-checksum staleness
+# model. The native installer is otherwise attractive (252 MB, and needs no
+# system Node, versus 181 + 307 MB for node + claude-code; measured 2026-07-21)
+# and the tart backend does use it (runtime/tart/build.go) — that backend
+# brokers nothing, so the proxy constraint does not bind there.
 ENV DISABLE_INSTALLATION_CHECKS=1
 # DL3016 (pin npm versions) suppressed: see the comment above — agents'
 # server-side APIs evolve continuously and the CLI clients must track. A pin
@@ -141,6 +153,11 @@ ENV DISABLE_INSTALLATION_CHECKS=1
 # "default" in internal/agent/agent.go — so claude stays unpinned. DF52.)
 # Retry-wrapped (like the golangci-lint install above): a transient npm-registry
 # hiccup otherwise fails the whole multi-minute base build with no recovery.
+#
+# The npm cache is dropped at the end for the same reason GOCACHE is above: npm
+# keeps every fetched tarball under $HOME/.npm, measured at 77 MB for
+# claude-code alone (2026-07-21) and larger with all four installed. It is only
+# a re-download accelerator, and nothing in a sandbox re-installs these.
 # hadolint ignore=DL3016
 RUN n=0; until [ "$n" -ge 5 ]; do \
       npm install -g @anthropic-ai/claude-code \
@@ -149,7 +166,8 @@ RUN n=0; until [ "$n" -ge 5 ]; do \
         && npm install -g opencode-ai && break; \
       n=$((n+1)); echo "npm install failed (attempt $n/5); retrying in 5s"; sleep 5; \
     done; \
-    [ "$n" -lt 5 ] || { echo "npm install failed after 5 attempts"; exit 1; }
+    [ "$n" -lt 5 ] || { echo "npm install failed after 5 attempts"; exit 1; }; \
+    npm cache clean --force 2>/dev/null || true
 # Aider via uv on a bundled Python 3.12. aider-chat pins exact dependency
 # versions and caps requires-python at <3.13, so it cannot install against the
 # base image's system Python (3.13 on trixie) — a plain `pip install` backtracks
