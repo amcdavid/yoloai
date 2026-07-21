@@ -1,3 +1,21 @@
+# yoloai-base, "batteries" half.
+#
+# This file is NOT a complete image. It is composed at build time with
+# resources/runtime-layer.Dockerfile, which appends everything yoloAI itself
+# requires — the runtime user, the /yoloai state tree, the entrypoint scripts,
+# gosu, the label, and the ENTRYPOINT. See runtime/docker/build.go
+# (composeDockerfile) for the composition, and the layer file for why the split
+# exists: the same layer is what makes a user-supplied base image drivable.
+#
+# So: everything here is a *stack choice* (toolchains, agent CLIs, dev tools),
+# and everything yoloAI structurally depends on is in the layer. If you are
+# adding something yoloAI cannot run without, it belongs in the layer and in
+# internal/imagecontract, not here.
+#
+# The layer re-installs a few packages this file already lists (tmux, git,
+# python3, sudo, iptables, ipset). That duplication is deliberate: apt is
+# idempotent, and it keeps the layer correct against a base that has none of
+# them. It costs one apt-get update on a build that already takes minutes.
 FROM debian:trixie-slim
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -178,106 +196,3 @@ RUN printf '#!/bin/sh\nexec aider --yes-always "$@"\n' > /usr/local/bin/yolo-aid
     && printf '#!/bin/sh\nexec gemini --yolo "$@"\n' > /usr/local/bin/yolo-gemini \
     && printf '#!/bin/sh\nexec opencode "$@"\n' > /usr/local/bin/yolo-opencode \
     && chmod +x /usr/local/bin/yolo-aider /usr/local/bin/yolo-claude /usr/local/bin/yolo-codex /usr/local/bin/yolo-gemini /usr/local/bin/yolo-opencode
-
-# gosu for dropping privileges
-ARG GOSU_VERSION=1.17
-RUN curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-$(dpkg --print-architecture)" \
-      -o /usr/local/bin/gosu \
-    && chmod +x /usr/local/bin/gosu \
-    && gosu --version
-
-# Docker daemon storage driver is intentionally NOT pinned (no /etc/docker/daemon.json).
-# yoloAI mounts a real-filesystem volume at /var/lib/docker for privileged sandboxes
-# (see docker.go Create), so the nested dockerd auto-selects the native overlay driver —
-# fast, low-disk, and exec-safe on every provider (Linux + all macOS VMs). fuse-overlayfs
-# stays installed (above) as a fallback for an overlay backing; sandbox-setup.py's
-# start_dockerd selects it only then. A static pin can't express that and conflicts with a
-# --storage-driver flag.
-
-# Add /sbin and /usr/sbin to PATH so tools like sysctl are found by subprocesses
-# (rootlesskit child scripts, dockerd hooks) that don't inherit a full login PATH.
-# SC2016: same reason as the golang.sh and cargo.sh writes — `$PATH` is the
-# literal we want in /etc/profile.d/, expanded by the sourcing shell at runtime.
-# hadolint ignore=SC2016
-RUN echo 'export PATH="/usr/sbin:/sbin:$PATH"' > /etc/profile.d/sbin-path.sh
-
-# Non-root user (placeholder UID/GID — entrypoint adjusts at runtime)
-RUN groupadd -g 1001 yoloai \
-    && useradd -m -u 1001 -g yoloai -s /bin/bash yoloai \
-    && echo 'yoloai ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/yoloai \
-    && chmod 0440 /etc/sudoers.d/yoloai \
-    && echo "yoloai:1001:64535" > /etc/subuid \
-    && echo "yoloai:1001:64535" > /etc/subgid \
-    && usermod -aG docker yoloai
-
-# Pre-create agent state directories and home seed file placeholders so
-# bind mount targets exist in the image. Kata Containers (and any OCI runtime
-# that does not auto-create missing targets like runc does) requires that both
-# directory and file bind mount destinations exist before the mount is applied.
-# The file placeholders are deliberately EMPTY and generic — agent-specific
-# defaults (e.g. aider's "{}" conf) live in the agent definition via
-# SeedFile.Content, which always stages the file so it is bind-mounted *over*
-# the empty placeholder; the placeholder is never the file the agent reads.
-RUN mkdir -p \
-        /home/yoloai/.claude \
-        /home/yoloai/.gemini \
-        /home/yoloai/.codex \
-        /home/yoloai/.local/share/opencode \
-        /home/yoloai/.config/github-copilot \
-        /home/yoloai/.config/opencode \
-        /home/yoloai/.vscode/cli \
-    && touch \
-        /home/yoloai/.claude.json \
-        /home/yoloai/.opencode.json \
-        /home/yoloai/.aider.conf.yml \
-        /home/yoloai/.tmux.conf \
-    && chown -R yoloai:yoloai /home/yoloai
-
-# UTF-8 locale — C.UTF-8 is always present on Debian/Ubuntu without locale-gen.
-# Without this, apps like Claude Code fall back to ASCII rendering.
-ENV LANG=C.UTF-8
-
-# Internal directory for sandbox runtime files
-ENV YOLOAI_DIR=/yoloai
-RUN mkdir -p \
-        /yoloai/bin \
-        /yoloai/tmux \
-        /yoloai/logs \
-        /yoloai/files \
-        /yoloai/cache \
-        /yoloai/overlay \
-    && touch \
-        /yoloai/agent-status.json \
-        /yoloai/runtime-config.json \
-        /yoloai/prompt.txt \
-    && mkdir -p /run/secrets \
-    && chown -R yoloai:yoloai /yoloai
-
-COPY tmux.conf /yoloai/tmux/tmux.conf
-COPY entrypoint.sh /yoloai/bin/entrypoint.sh
-COPY entrypoint.py /yoloai/bin/entrypoint.py
-COPY firewall.py /yoloai/bin/firewall.py
-COPY install-firewall.py /yoloai/bin/install-firewall.py
-COPY sandbox-setup.py /yoloai/bin/sandbox-setup.py
-COPY setup_helpers.py /yoloai/bin/setup_helpers.py
-COPY tmux_io.py /yoloai/bin/tmux_io.py
-COPY status-monitor.py /yoloai/bin/status-monitor.py
-COPY diagnose-idle.sh /yoloai/bin/diagnose-idle.sh
-COPY agent-run.sh /yoloai/bin/agent-run.sh
-COPY yoloai-resume /yoloai/bin/yoloai-resume
-# chmod the exec scripts, and put /yoloai/bin on PATH so the fall-to-shell user
-# can run `yoloai-resume` by name (D96). SC2016: the literal `$PATH` is intended —
-# it is expanded by the shell that sources the profile, same as golang.sh above.
-# hadolint ignore=SC2016
-RUN chmod +x /yoloai/bin/entrypoint.sh /yoloai/bin/entrypoint.py /yoloai/bin/install-firewall.py /yoloai/bin/diagnose-idle.sh /yoloai/bin/agent-run.sh /yoloai/bin/yoloai-resume \
-    && echo 'export PATH="/yoloai/bin:$PATH"' > /etc/profile.d/yoloai-bin.sh
-
-# Marks this image (and every profile image built FROM it — LABELs are inherited)
-# as yoloai-authored, matching the com.yoloai.managed label already stamped on
-# yoloai-created volumes. Seeded now but NOT YET USED to scope image pruning:
-# `system prune --images` stays daemon-wide until the switch registered in
-# docs/contributors/deprecations.md comes due, so pre-label images on existing
-# installs still get reclaimed in the meantime.
-LABEL com.yoloai.managed="true"
-
-ENTRYPOINT ["/yoloai/bin/entrypoint.sh"]
