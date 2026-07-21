@@ -78,6 +78,9 @@ func resolveProfileConfig(ctx context.Context, d state.Deps, opts *Options, agen
 	if err := config.ValidateProfileBackend(merged.Backend, string(backend)); err != nil {
 		return nil, err
 	}
+	if err := config.ValidateProfileBase(merged.Base, d.Runtime.Descriptor().Capabilities.CapAdd); err != nil {
+		return nil, err
+	}
 
 	// baseAgent is "what the agent would be if the user passed no --agent", and
 	// it must be resolved from the SAME layers the CLI resolved opts.Agent from,
