@@ -194,3 +194,70 @@ func TestChainChecksum_BaseSeedPropagates(t *testing.T) {
 	assert.NotEqual(t, chainChecksum(dir, "base-v1"), chainChecksum(dir, ""),
 		"seeded and unseeded must differ, or the seed is not reaching the hash")
 }
+
+// customBaseFake is a backend that records what it was asked to build. It
+// embeds runtime.Backend so only the methods EnsureProfileImage reaches need
+// writing; anything else panics, which is the right failure for a test of this
+// path.
+type customBaseFake struct {
+	runtime.Backend
+	builtDockerfile map[string]string // tag → the Dockerfile in the dir it was handed
+	builtChecksum   map[string]string // tag → the checksum it was asked to stamp
+}
+
+func (*customBaseFake) Descriptor() runtime.BackendDescriptor {
+	return runtime.BackendDescriptor{Capabilities: runtime.BackendCaps{CapAdd: true}}
+}
+
+func (*customBaseFake) Setup(context.Context, config.Layout, string, feedback.ProgressSink, feedback.Sink, *slog.Logger, bool) error {
+	return nil
+}
+
+func (f *customBaseFake) BuildProfileImage(_ context.Context, dir, tag, checksum string, _ []string, _ config.Layout, _ feedback.ProgressSink, _ feedback.Sink, _ *slog.Logger) error {
+	data, err := os.ReadFile(filepath.Join(dir, "Dockerfile")) //nolint:gosec // G304: test temp dir
+	if err != nil {
+		return err
+	}
+	f.builtDockerfile[tag] = string(data)
+	f.builtChecksum[tag] = checksum
+	return nil
+}
+
+func (*customBaseFake) ImageLabels(context.Context, string) (map[string]string, bool) {
+	return nil, false // nothing in the store: every image needs building
+}
+
+func (*customBaseFake) ExpectedBaseChecksum() string { return "" }
+
+// TestEnsureProfileImage_CustomBaseBuildsTheAssembly covers the wiring rather
+// than the assembler: a profile with base: and no Dockerfile still gets an
+// image, the backend is handed the assembled context rather than the profile
+// directory, and the checksum it stamps moves when agents: does — the edit that
+// otherwise reaches no build input at all, since config.yaml is never in one.
+func TestEnsureProfileImage_CustomBaseBuildsTheAssembly(t *testing.T) {
+	layout := config.NewLayout(t.TempDir()).WithPrincipal("test")
+	profileDir := layout.ProfileDir("rdev")
+	require.NoError(t, os.MkdirAll(profileDir, 0o750))
+	writeConfig := func(agents string) {
+		cfg := "base: image:rocker/r-ver:4.4\nagents: [" + agents + "]\n"
+		require.NoError(t, os.WriteFile(filepath.Join(profileDir, "config.yaml"), []byte(cfg), 0o600))
+	}
+
+	build := func() (dockerfile, checksum string) {
+		f := &customBaseFake{builtDockerfile: map[string]string{}, builtChecksum: map[string]string{}}
+		require.NoError(t, EnsureProfileImage(context.Background(), f, layout, "rdev", nil, feedback.DiscardProgress, feedback.Discard, slog.New(slog.DiscardHandler), false))
+		tag := config.ProfileImageTag(layout, "rdev")
+		require.Contains(t, f.builtDockerfile, tag, "a base:-only profile must still get an image")
+		return f.builtDockerfile[tag], f.builtChecksum[tag]
+	}
+
+	writeConfig("claude")
+	dockerfile, claudeSum := build()
+	assert.Contains(t, dockerfile, "FROM rocker/r-ver:4.4")
+	assert.Contains(t, dockerfile, `ENTRYPOINT ["/yoloai/bin/entrypoint.sh"]`, "the runtime layer must be appended")
+	assert.NotEmpty(t, claudeSum)
+
+	writeConfig("codex")
+	_, codexSum := build()
+	assert.NotEqual(t, claudeSum, codexSum, "an agents: edit must change the checksum, or it never rebuilds")
+}

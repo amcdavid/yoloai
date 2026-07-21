@@ -1347,6 +1347,21 @@ earlier signal and records nothing else.
 - **What would actually close it:** typecheck the research corpus for a fixed platform rather than the host's (mypy's `--platform`), so both hosts agree — or accept that the corpus is Linux-only and exclude it from the macOS run. Either makes the gate say the same thing on both machines, which is the property it currently lacks.
 - **Pointer:** `docs/contributors/design/research/mac-channel/c1_guest_initiate.py`; `docs/contributors/design/research/mac-channel/c1_guest_vsock.py` (the convention); `Makefile` (`python-typecheck`).
 
+### DF237 — a custom base `image:<ref>` on a moving tag is not re-pulled until `--rebuild`
+
+- **Discovered:** 2026-07-21 (filed 2026-11-17) · **Workstream:** pluggable base images
+- **Severity:** LOW
+- **Disposition:** UNRESOLVED — PARKED
+- **Rides:** **any** — following the digest is additive.
+- **Description:** A profile's chain checksum hashes the assembled Dockerfile, which names the base
+  by its ref string (`FROM rocker/r-ver:4.4`), not by the digest that ref resolved to. When the
+  registry moves the tag, nothing yoloAI hashes changes, so the profile image is reported current and
+  keeps the old base until the user passes `--rebuild`. A pinned digest (`image:<ref>@sha256:…`) is
+  unaffected. The commit that introduced custom bases claimed this was filed here; it was not, until
+  the rebase onto v0.12.0 caught the false pointer.
+- **Pointer:** `internal/orchestrator/profiles/profile_build.go` (`customBaseContext`);
+  `runtime/docker/assemble.go` (`resolveStackHalf`).
+
 ## Policy origin
 
 Established in [architecture-remediation.md](../archive/plans/architecture-remediation.md) and inherited by [layering-refactor.md](../archive/plans/layering-refactor.md).

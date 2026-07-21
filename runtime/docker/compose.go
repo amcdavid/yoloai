@@ -3,7 +3,10 @@
 
 package docker
 
-import "bytes"
+import (
+	"bytes"
+	"strings"
+)
 
 // composeSeparator introduces the appended layer in the composed output. Build
 // logs and `docker history` show the composed file, not its two sources, so the
@@ -44,4 +47,36 @@ func ComposeDockerfile(stack []byte) []byte {
 		b.WriteString("\n")
 	}
 	return b.Bytes()
+}
+
+// agentInstallSeparator introduces the generated agent-install steps in an
+// assembled custom-base Dockerfile, for the same reason as composeSeparator:
+// build logs show the composed file, so the boundary between the user's stack and
+// yoloAI's generated installs is marked.
+const agentInstallSeparator = `
+# ----------------------------------------------------------------------------
+# yoloAI agent installs — generated from the profile's resolved agent set.
+# ----------------------------------------------------------------------------
+`
+
+// AssembleCustomBaseDockerfile builds a complete Dockerfile for a custom base
+// from three pieces: a stack half (which must already contain exactly one FROM —
+// the yoloai-minimal stack, a synthesized `FROM <image>`, or a user Dockerfile),
+// the selected agents' install steps, and yoloAI's runtime layer.
+//
+// It is the custom-base analogue of composing yoloai-base from embeddedBatteries:
+// the same runtime layer is appended last (via ComposeDockerfile), so a profile
+// image built on any base is driven by the identical, single runtime contract.
+// agentInstalls may be empty (a base that bakes no agent — e.g. an image that
+// already carries one); the runtime layer is always appended.
+func AssembleCustomBaseDockerfile(stack []byte, agentInstalls string) []byte {
+	var b bytes.Buffer
+	b.Write(bytes.TrimRight(stack, "\n"))
+	b.WriteString("\n")
+	if agentInstalls != "" {
+		b.WriteString(agentInstallSeparator)
+		b.WriteString(strings.TrimRight(agentInstalls, "\n"))
+		b.WriteString("\n")
+	}
+	return ComposeDockerfile(b.Bytes())
 }
