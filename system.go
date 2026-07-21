@@ -20,6 +20,7 @@ import (
 	"github.com/kstenerud/yoloai/internal/config"
 	"github.com/kstenerud/yoloai/internal/envsetup"
 	"github.com/kstenerud/yoloai/internal/git"
+	"github.com/kstenerud/yoloai/internal/imagecontract"
 	"github.com/kstenerud/yoloai/internal/orchestrator"
 	"github.com/kstenerud/yoloai/internal/orchestrator/envspec"
 	"github.com/kstenerud/yoloai/internal/orchestrator/launch"
@@ -233,6 +234,86 @@ func (s *System) AllSandboxes(ctx context.Context) ([]*SandboxInfo, []BackendTyp
 // or CLI can pre-validate a name before any other verb is called.
 func (s *System) ValidateSandboxName(name string) error {
 	return store.ValidateName(name)
+}
+
+// ImageContractViolation is one requirement a verified image failed to satisfy.
+type ImageContractViolation struct {
+	Name string // the missing binary, path, or user
+	Why  string // the consequence of its absence, for the user
+	Soft bool   // true for a degraded-not-broken miss (e.g. ipset, docker)
+}
+
+// VerifyImageResult is the outcome of System.VerifyImage.
+type VerifyImageResult struct {
+	Image      string                   // the image ref that was checked
+	Agent      AgentType                // the agent whose binary was also required, if any
+	Violations []ImageContractViolation // empty when the image is fully conformant
+}
+
+// OK reports whether the image satisfies every hard requirement. Soft
+// violations (a missing ipset or docker) do not make OK false — they are
+// warnings, not failures.
+func (r *VerifyImageResult) OK() bool {
+	for _, v := range r.Violations {
+		if !v.Soft {
+			return false
+		}
+	}
+	return true
+}
+
+// VerifyImage checks whether imageRef satisfies yoloAI's runtime contract by
+// running a probe inside a throwaway container on the given backend. When agent
+// is non-empty, the check also requires that agent's launch binary — an image
+// can be structurally sound yet lack the agent a sandbox would try to run.
+//
+// Returns a *UsageError when the backend cannot verify images (Tart, Seatbelt —
+// they have no image concept), so the CLI can distinguish "unsupported here"
+// from a genuine probe failure.
+func (s *System) VerifyImage(ctx context.Context, backend BackendType, imageRef string, agentType AgentType) (*VerifyImageResult, error) {
+	rt, err := runtime.New(ctx, runtime.BackendType(backend), s.layout)
+	if err != nil {
+		return nil, err
+	}
+	verifier, ok := runtime.VerifierOf(rt)
+	if !ok {
+		return nil, yoerrors.NewUsageError("backend %q cannot verify images (it has no OCI image concept)", backend)
+	}
+
+	// Hard requirements first, then soft, then the agent binary — one probe run
+	// covers all three. Track which names are soft so the result can label them.
+	reqs := imagecontract.Static()
+	soft := imagecontract.SoftStatic()
+	softNames := make(map[string]bool, len(soft))
+	for _, r := range soft {
+		softNames[r.Name] = true
+	}
+	reqs = append(reqs, soft...)
+
+	if agentType != "" {
+		def := agent.GetAgent(string(agentType))
+		if def == nil {
+			return nil, yoerrors.NewUsageError("unknown agent %q", agentType)
+		}
+		if req, has := imagecontract.AgentBinary(string(agentType), def.InteractiveCmd); has {
+			reqs = append(reqs, req)
+		}
+	}
+
+	results, err := verifier.VerifyImage(ctx, imageRef, reqs)
+	if err != nil {
+		return nil, err
+	}
+
+	out := &VerifyImageResult{Image: imageRef, Agent: agentType}
+	for _, m := range imagecontract.Missing(results) {
+		out.Violations = append(out.Violations, ImageContractViolation{
+			Name: m.Req.Name,
+			Why:  m.Req.Why,
+			Soft: softNames[m.Req.Name],
+		})
+	}
+	return out, nil
 }
 
 // Info returns the installation's paths and per-backend availability in one

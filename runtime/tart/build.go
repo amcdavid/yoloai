@@ -20,6 +20,7 @@ import (
 	"github.com/kstenerud/yoloai/internal/buildinfo"
 	"github.com/kstenerud/yoloai/internal/config"
 	"github.com/kstenerud/yoloai/internal/fileutil"
+	"github.com/kstenerud/yoloai/internal/imagecontract"
 	"github.com/kstenerud/yoloai/internal/sysexec"
 )
 
@@ -95,10 +96,30 @@ var provisionCommands = []string{
 	`grep -q 'yoloai-base PATH' ~/.zprofile 2>/dev/null || printf '%s\n' '# yoloai-base PATH' 'eval "$(/opt/homebrew/bin/brew shellenv)"' 'export PATH="/opt/homebrew/opt/node@22/bin:$HOME/.local/bin:$PATH"' >> ~/.zprofile`,
 }
 
+// tartExtraTools are binaries this base provisions beyond the shared runtime
+// contract: the agent's own launcher plus the conveniences provisionCommands
+// installs by name (`brew install tmux jq ripgrep node@22`). They are verified
+// because provisionCommands is what put them there — a silent brew failure
+// should fail the build, not surface later as a broken sandbox.
+//
+// `claude` is here rather than derived from the agent layer because the tart
+// base bakes exactly one agent via the native installer (see provisionCommands);
+// it is not selectable per sandbox the way container images will become.
+var tartExtraTools = []string{"node", "jq", "rg", "claude"}
+
 // requiredTools are the binaries the provisioned base must expose on the login
 // shell PATH. Verified in-guest after provisioning; a missing tool fails the
 // build before the new base is promoted.
-var requiredTools = []string{"tmux", "node", "jq", "rg", "claude"}
+//
+// The shared half comes from imagecontract.Universal() rather than a local list,
+// so a new cross-backend requirement cannot land for containers while silently
+// skipping tart. The previous hand-maintained list had already drifted: it
+// checked for `node` (an agent prerequisite, not a yoloAI one) but not `git` or
+// `python3`, both of which the guest genuinely needs — copy-mode shells out to
+// git in the guest, and sandbox-setup.py is Python.
+func requiredTools() []string {
+	return append(imagecontract.Names(imagecontract.Universal()), tartExtraTools...)
+}
 
 // Setup ensures the provisioned base VM image exists, pulling and provisioning
 // as needed. If imageRef is set in config (tart.image override), it uses that
@@ -346,9 +367,10 @@ func (r *Runtime) recordBuildInfo(baseImage string) {
 // shell PATH (zsh -l sources ~/.zprofile). Returns an error naming the first
 // missing tool — that is what the provisioned base must guarantee.
 func (r *Runtime) verifyTools(ctx context.Context, vmName string, output io.Writer) error {
+	tools := requiredTools()
 	script := fmt.Sprintf(
 		`for t in %s; do command -v "$t" >/dev/null 2>&1 || { echo "MISSING: $t" >&2; exit 1; }; done`,
-		strings.Join(requiredTools, " "),
+		strings.Join(tools, " "),
 	)
 	args := execArgs(vmName, "zsh", "-lc", script)
 	cmd := sysexec.CommandContext(ctx, r.execEnv, r.tartBin, args...)
@@ -359,7 +381,7 @@ func (r *Runtime) verifyTools(ctx context.Context, vmName string, output io.Writ
 	cmd.Stdout = w
 	cmd.Stderr = w
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("tool verification failed (a required tool of %v is missing from the login PATH): %w%s", requiredTools, err, tail.ErrorSuffix())
+		return fmt.Errorf("tool verification failed (a required tool of %v is missing from the login PATH): %w%s", tools, err, tail.ErrorSuffix())
 	}
 	return nil
 }

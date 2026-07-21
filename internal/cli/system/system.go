@@ -33,6 +33,7 @@ func NewCmd(version, commit, date string) *cobra.Command {
 		newSystemMigrateCmd(),
 		newSystemPruneCmd(),
 		newSystemSetupCmd(),
+		newSystemVerifyImageCmd(),
 		tart.NewCmd(cliutil.System),
 		newCompletionCmd(),
 	)

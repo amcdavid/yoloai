@@ -336,3 +336,30 @@ func TestSystem_CheckAgent(t *testing.T) {
 		assert.Contains(t, res.Message, "unknown agent")
 	})
 }
+
+func TestVerifyImageResult_OK(t *testing.T) {
+	// A hard violation fails OK; soft-only violations do not — soft misses
+	// (ipset, docker) are warnings, and treating them as failures would make a
+	// legitimately minimal image report as broken.
+	tests := []struct {
+		name       string
+		violations []ImageContractViolation
+		wantOK     bool
+	}{
+		{"conformant", nil, true},
+		{"soft only", []ImageContractViolation{{Name: "ipset", Soft: true}}, true},
+		{"one hard", []ImageContractViolation{{Name: "tmux", Soft: false}}, false},
+		{"hard and soft", []ImageContractViolation{
+			{Name: "docker", Soft: true},
+			{Name: "gosu", Soft: false},
+		}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &VerifyImageResult{Violations: tc.violations}
+			if r.OK() != tc.wantOK {
+				t.Errorf("OK() = %v, want %v", r.OK(), tc.wantOK)
+			}
+		})
+	}
+}

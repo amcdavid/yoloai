@@ -100,7 +100,7 @@ func buildInputsChecksum() string {
 		content []byte
 	}
 	files := []namedContent{
-		{"Dockerfile", embeddedDockerfile},
+		{"Dockerfile", ComposeDockerfile(embeddedBatteries)},
 		{"entrypoint.sh", embeddedEntrypoint},
 		{"entrypoint.py", embeddedEntrypointPy},
 		{"firewall.py", embeddedFirewallPy},
@@ -256,7 +256,7 @@ func createBuildContext() (io.Reader, error) {
 		tarName string
 		content []byte
 	}{
-		{"Dockerfile", embeddedDockerfile},
+		{"Dockerfile", ComposeDockerfile(embeddedBatteries)},
 		{"entrypoint.sh", embeddedEntrypoint},
 		{"entrypoint.py", embeddedEntrypointPy},
 		{"firewall.py", embeddedFirewallPy},
