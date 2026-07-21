@@ -12,6 +12,7 @@ import (
 
 	"github.com/kstenerud/yoloai/feedback"
 	"github.com/kstenerud/yoloai/internal/config"
+	"github.com/kstenerud/yoloai/internal/imagecontract"
 	"github.com/kstenerud/yoloai/runtime/caps"
 )
 
@@ -634,6 +635,25 @@ type RuntimeScriptProvider interface {
 func RuntimeScriptProviderOf(rt Backend) (RuntimeScriptProvider, bool) {
 	p, ok := rt.(RuntimeScriptProvider)
 	return p, ok
+}
+
+// ImageVerifier is an optional interface for backends that can check whether an
+// arbitrary image satisfies yoloAI's runtime contract by running a probe inside
+// a throwaway container. Implemented by the OCI backends (docker/podman); Tart
+// and Seatbelt have no image to verify and do not implement it.
+//
+// This is what `yoloai system verify-image` drives, and what a user building a
+// custom base image checks their work against — turning a contract violation
+// into a diagnostic before container start, instead of a bare exec failure at
+// boot.
+type ImageVerifier interface {
+	VerifyImage(ctx context.Context, imageRef string, reqs []imagecontract.Requirement) ([]imagecontract.ProbeResult, error)
+}
+
+// VerifierOf returns rt as an ImageVerifier if the backend implements one.
+func VerifierOf(rt Backend) (ImageVerifier, bool) {
+	v, ok := rt.(ImageVerifier)
+	return v, ok
 }
 
 // CachePruner is an optional interface for backends that maintain an

@@ -11,8 +11,28 @@ import (
 	"github.com/kstenerud/yoloai/runtime/monitor"
 )
 
+// embeddedBatteries is the stack half of yoloai-base — toolchains, agent CLIs,
+// dev tooling. It is NOT a complete image on its own; ComposeDockerfile appends
+// embeddedRuntimeLayer to it.
+//
 //go:embed resources/Dockerfile
-var embeddedDockerfile []byte
+var embeddedBatteries []byte
+
+// embeddedRuntimeLayer is the fragment that makes any Debian/Ubuntu-derived
+// image drivable by yoloAI: the runtime user, the /yoloai tree, the entrypoint
+// scripts, gosu, the managed label, and the ENTRYPOINT. Appended to the
+// batteries half to compose yoloai-base, and reusable against a user-supplied
+// base. It establishes exactly internal/imagecontract.Static().
+//
+//go:embed resources/runtime-layer.Dockerfile
+var embeddedRuntimeLayer []byte
+
+// embeddedDockerfile is the complete yoloai-base Dockerfile: the batteries half
+// with the runtime layer appended. Composed once, here, so that every consumer —
+// the build context, the identity checksum, the apple size gate, the reference
+// copy — sees the bytes that are actually built, and none can drift to the
+// incomplete half.
+var embeddedDockerfile = ComposeDockerfile(embeddedBatteries)
 
 //go:embed resources/entrypoint.sh
 var embeddedEntrypoint []byte
