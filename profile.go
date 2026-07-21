@@ -25,6 +25,10 @@ const profileScaffold = `# agent: claude
 # model: sonnet
 # backend: docker   # optional backend constraint
 # os: linux         # guest OS: linux, mac
+# base: yoloai-minimal   # custom base image (OCI backends only): yoloai-base (default),
+#                        # yoloai-minimal, image:<ref>, or dockerfile:<file-in-profile-dir>
+# agents:                # which agent CLIs to bake into a custom-base image
+#   - claude             # (defaults to this profile's resolved agent)
 # tart:
 #   image: my-vm    # Tart backend only
 # ports:
