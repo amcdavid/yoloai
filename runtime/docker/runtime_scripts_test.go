@@ -81,7 +81,7 @@ func TestBaseBuildInputs_MatchTheDockerfilesBinCopies(t *testing.T) {
 // that loses its exec bit only under the mount is a launch failure on one path
 // and not the other.
 func TestBaseBuildInputs_ExecutableSetMatchesTheDockerfile(t *testing.T) {
-	chmodRe := regexp.MustCompile(`(?s)RUN chmod \+x (.*?)\\\n`)
+	chmodRe := regexp.MustCompile(`(?m)^RUN chmod \+x ([^\\\n]*)`)
 	m := chmodRe.FindStringSubmatch(string(embeddedDockerfile))
 	require.Len(t, m, 2, "could not find the Dockerfile's `RUN chmod +x` line")
 

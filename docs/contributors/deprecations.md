@@ -236,7 +236,7 @@ installs did not actually work, which is evidence about how much it was exercise
   ruled the immediate scoping a **bugfix**, not a break: reaping foreign images was the DF137-class
   defect, and whole-daemon image pruning was never a promised capability). `pruneManagedImages`
   (`runtime/docker/prune.go`) reclaims unused images matching `com.yoloai.managed` (stamped by the
-  base Dockerfile, inherited by `FROM yoloai-base` builds) **∪** `yoloaiImageName` — an anchored,
+  runtime layer, so inherited by `FROM yoloai-base` builds and present on custom-base images) **∪** `yoloaiImageName` — an anchored,
   bare-local `yoloai-` name. That name predicate is the deprecation: it exists only so images built
   *before* the label existed keep being reclaimed. Every name-only match is logged
   ("matched by name only (pre-label…)"), so the population's decay is observable; if it does not
@@ -246,7 +246,7 @@ installs did not actually work, which is evidence about how much it was exercise
   the owner accepted that bespoke unlabeled images are the creator's to clean, so the old entry's
   12-month adoption rationale no longer applies.
 - **Pointer:** `runtime/docker/prune.go` (`pruneManagedImages`, `yoloaiImageName`);
-  `runtime/docker/resources/Dockerfile` (`LABEL com.yoloai.managed`); DF137.
+  `runtime/docker/resources/runtime-layer.Dockerfile` (`LABEL com.yoloai.managed`); DF137.
 
 ### `.yoloai.yaml` existence-check warning
 
