@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/kstenerud/yoloai/internal/agent"
 	"github.com/kstenerud/yoloai/internal/imagecontract"
 	"github.com/kstenerud/yoloai/runtime"
 )
@@ -151,4 +152,33 @@ func TestBuildInputsChecksumCoversBothHalves(t *testing.T) {
 	require.NotEmpty(t, sum)
 	require.Contains(t, string(ComposeDockerfile(embeddedBatteries)), "yoloAI runtime layer",
 		"checksum input must be the composed file, so layer edits change it")
+}
+
+// TestAgentInstalls_MatchTheBatteriesDockerfile keeps a custom-base image's
+// agents in step with yoloai-base's. The two install the same CLIs from separate
+// text — the batteries Dockerfile's npm layer, and each agent.Definition's
+// InstallCmd rendered by agent.InstallDockerfile — and nothing else ties them.
+// They had drifted twice when this was written: the declarative installs carried
+// no version floor, and pinned Node 20 where the Dockerfile had moved to 22, which
+// silently held a custom base at Claude Code 2.1.197 (DF158).
+func TestAgentInstalls_MatchTheBatteriesDockerfile(t *testing.T) {
+	batteries := string(embeddedBatteries)
+	for _, name := range agent.RealAgents() {
+		def := agent.GetAgent(name)
+		if def == nil || !def.InstallViaNPM {
+			continue
+		}
+		// The Dockerfile chains its installs with `&& npm install -g ...`, so the
+		// spec — quoted, floor and all — is what must appear verbatim.
+		spec := strings.TrimPrefix(def.InstallCmd, "npm install -g ")
+		require.True(t, strings.Contains(batteries, "npm install -g "+spec),
+			"agent %q installs %s, which the batteries Dockerfile does not; raise both floors together", name, spec)
+	}
+
+	m := regexp.MustCompile(`(?m)^ARG NODE_MAJOR=(\d+)$`).FindStringSubmatch(batteries)
+	require.Len(t, m, 2, "could not find ARG NODE_MAJOR in the batteries Dockerfile")
+	installs, err := agent.InstallDockerfile([]string{"claude"})
+	require.NoError(t, err)
+	require.Contains(t, installs, "node_"+m[1]+".x",
+		"agent.InstallDockerfile must install the same Node major as the batteries Dockerfile (NODE_MAJOR=%s)", m[1])
 }
