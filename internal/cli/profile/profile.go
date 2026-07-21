@@ -265,6 +265,12 @@ func printProfileInfoScalars(out io.Writer, merged *yoloai.ResolvedProfileConfig
 	if merged.Isolation != "" {
 		fmt.Fprintf(out, "Isolation:   %s\n", merged.Isolation) //nolint:errcheck
 	}
+	if merged.Base != "" {
+		fmt.Fprintf(out, "Base:        %s\n", merged.Base) //nolint:errcheck
+	}
+	if len(merged.Agents) > 0 {
+		fmt.Fprintf(out, "Agents:      %s\n", strings.Join(merged.Agents, ", ")) //nolint:errcheck
+	}
 }
 
 // printProfileInfoMaps prints map and list fields (env, agent args, ports, mounts).

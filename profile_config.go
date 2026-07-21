@@ -34,6 +34,12 @@ type ResolvedProfileConfig struct {
 	Setup              []string           `json:"setup,omitempty"`
 	AutoCommitInterval int                `json:"auto_commit_interval,omitempty"`
 	Isolation          string             `json:"isolation,omitempty"`
+	// Base is the custom base image the profile's image is assembled FROM
+	// (config key "base"); empty means the default yoloai-base with no re-layer.
+	Base string `json:"base,omitempty"`
+	// Agents is the set of agent CLIs baked into a custom-base image (config key
+	// "agents"); empty means "the resolved agent". Only meaningful when Base is set.
+	Agents []string `json:"agents,omitempty"`
 }
 
 // ProfileWorkdir is the resolved primary working directory of a profile.
@@ -93,6 +99,8 @@ func resolvedProfileConfigFromMerged(m *config.MergedConfig) *ResolvedProfileCon
 		Setup:              m.Setup,
 		AutoCommitInterval: m.AutoCommitInterval,
 		Isolation:          m.Isolation,
+		Base:               m.Base,
+		Agents:             m.Agents,
 	}
 	if m.Workdir != nil {
 		pc.Workdir = &ProfileWorkdir{
