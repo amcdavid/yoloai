@@ -139,20 +139,33 @@ Caching benefit: a change to the entrypoint script doesn't invalidate the apt-in
 The base image carries everything yoloAI assumes is present in a sandbox:
 
 - **tmux** — session management; every backend uses it.
-- **git** — required for `:copy` mode's git-based diff/apply.
-- **iptables + ipset** — required for `--network-isolated`.
-- **dnsutils** — `dig` for domain resolution in network-isolation entrypoint.
+- **git** — required for `:copy` mode's git-based diff/apply, which runs git *inside* the container.
+- **gosu** — the entrypoint drops root to `yoloai` with it; the name is hardcoded, with no fallback.
+- **python3** — every entrypoint and the status monitor are Python (stdlib only).
+- **iptables + ipset** — required for `--network-isolated`. `ipset` is a soft dependency: `firewall.py` falls back to per-IP iptables rules without it.
 - **sudo** — for the `yoloai` user passwordless escalation.
-- **Standard dev tooling** (build-essential, cmake, clang, python3, curl, jq, ripgrep, fd-find, etc.) — broad coverage so most agents work out-of-box.
+- **Standard dev tooling** (build-essential, cmake, clang, curl, jq, ripgrep, fd-find, etc.) — broad coverage so most agents work out-of-box.
 - **Node.js 22 LTS** — for Claude Code, Codex, Gemini CLI installation.
 - **Docker CE + Compose plugin** — for Docker-in-Docker (D22 `--isolation container-privileged`).
+- **The agent CLIs** — see below.
 
 What does NOT go in the base image:
 
-- **Agent CLIs themselves** — installed at sandbox creation time per agent definition. Otherwise upgrading an agent would require rebuilding the base image.
 - **API keys** — injected at runtime via `/run/secrets/` (`../principles/security-principles.md §6`).
 - **User-specific configs** — handled via `agent_files` seeding mechanism.
 - **Anything per-project** — that's what profile Dockerfiles are for.
+
+**`dnsutils` is present but unused.** This section used to justify it as "`dig` for domain
+resolution in the network-isolation entrypoint". Nothing calls `dig`: `firewall.py` resolves
+allowlisted domains with Python's `socket.getaddrinfo`. It costs ~8 MB and is a candidate for
+removal — left in for now because an agent may use it interactively, which is a judgment call
+about the sandbox's dev-tool surface rather than a yoloAI requirement.
+
+**Agent CLIs are baked into the image, not installed at sandbox creation.** An earlier version
+of this section claimed the opposite. The install is the `npm install -g` layer in the base
+Dockerfile; at create time `sandbox-setup.py` only *checks* for the resolved agent's binary
+(`shutil.which`) and aborts the launch with "run `yoloai system build`" when it is missing.
+This matters because it means the image must be rebuilt to change which agents are available.
 
 ## Profile Dockerfiles (user-supplied)
 
