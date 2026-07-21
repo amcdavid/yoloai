@@ -76,11 +76,27 @@ type IdleSupport struct {
 
 // Definition describes an agent's install, launch, and behavioral characteristics.
 type Definition struct {
-	Type              AgentType
-	Description       string
-	InteractiveCmd    string
-	HeadlessCmd       string
-	PromptMode        PromptMode
+	Type           AgentType
+	Description    string
+	InteractiveCmd string
+	HeadlessCmd    string
+	PromptMode     PromptMode
+
+	// InstallCmd is the shell command that installs this agent's CLI, as the body
+	// of a Dockerfile RUN step. It exists to make the *baked* agent set selectable
+	// on a custom base (the pluggable-base path): the assembler emits one RUN per
+	// selected agent. The batteries Dockerfile (yoloai-base) still hardcodes the
+	// same lines — this field is the single source those installs move to once an
+	// image is assembled per profile rather than one-size-fits-all. Empty for
+	// pseudo-agents (test/idle/shell) that bake nothing.
+	InstallCmd string
+
+	// InstallViaNPM marks an agent whose InstallCmd is an `npm install -g` and so
+	// needs a Node.js runtime. The assembler installs Node once for the whole
+	// selected set (a shared prerequisite) rather than repeating it per agent, and
+	// wraps the npm installs in one retry loop; aider (uv/curl, self-contained)
+	// leaves this false.
+	InstallViaNPM     bool
 	APIKeyEnvVars     []string
 	AuthHintEnvVars   []string // env vars indicating auth is configured without a cloud API key (e.g. local model servers)
 	AuthOptional      bool     // when true, missing auth is a warning not an error (for agents with many auth paths)
@@ -281,9 +297,15 @@ var agents = map[string]*Definition{
 		// so Aider is hook-authoritative for IDLE; the active signal comes from
 		// yoloai's prompt-delivery (active-before-submit). Reuses the --write-status
 		// CLI (schema single-sourced).
-		InteractiveCmd:  "aider --yes-always --notifications --notifications-command 'python3 /yoloai/bin/status-monitor.py --write-status idle /yoloai/agent-status.json'",
-		HeadlessCmd:     `aider --message "PROMPT" --yes-always --no-pretty --no-fancy-input`,
-		PromptMode:      PromptModeInteractive,
+		InteractiveCmd: "aider --yes-always --notifications --notifications-command 'python3 /yoloai/bin/status-monitor.py --write-status idle /yoloai/agent-status.json'",
+		HeadlessCmd:    `aider --message "PROMPT" --yes-always --no-pretty --no-fancy-input`,
+		PromptMode:     PromptModeInteractive,
+		// aider via uv on a bundled Python 3.12 (see the batteries Dockerfile for
+		// why the system Python can't host it): self-contained, no Node prereq.
+		InstallCmd: "curl --retry 5 --retry-delay 2 --retry-all-errors -LsSf https://astral.sh/uv/install.sh " +
+			"| env UV_INSTALL_DIR=/usr/local/bin sh " +
+			"&& UV_TOOL_DIR=/opt/uv/tools UV_TOOL_BIN_DIR=/usr/local/bin UV_PYTHON_INSTALL_DIR=/opt/uv/python " +
+			"uv tool install --python 3.12 aider-chat",
 		APIKeyEnvVars:   []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"},
 		AuthHintEnvVars: []string{"OLLAMA_API_BASE", "OPENAI_API_BASE"},
 		SeedFiles: []SeedFile{
@@ -328,6 +350,8 @@ var agents = map[string]*Definition{
 		InteractiveCmd: "claude --dangerously-skip-permissions",
 		HeadlessCmd:    `claude -p "PROMPT" --dangerously-skip-permissions`,
 		PromptMode:     PromptModeInteractive,
+		InstallCmd:     "npm install -g @anthropic-ai/claude-code",
+		InstallViaNPM:  true,
 		ResumeFlag:     "--continue",
 		APIKeyEnvVars:  []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"},
 		Broker: &BrokerConfig{ //nolint:gosec // G101 false positive: env-var NAMES + a placeholder, not real credentials
@@ -429,6 +453,8 @@ var agents = map[string]*Definition{
 		InteractiveCmd: "gemini --yolo",
 		HeadlessCmd:    `gemini -p "PROMPT" --yolo`,
 		PromptMode:     PromptModeInteractive,
+		InstallCmd:     "npm install -g @google/gemini-cli",
+		InstallViaNPM:  true,
 		APIKeyEnvVars:  []string{"GEMINI_API_KEY"},
 		Broker: &BrokerConfig{ //nolint:gosec // G101 false positive: env-var NAMES + a placeholder, not real credentials
 			UpstreamURL: "https://generativelanguage.googleapis.com",
@@ -499,6 +525,8 @@ var agents = map[string]*Definition{
 		InteractiveCmd:  "opencode",
 		HeadlessCmd:     `opencode run "PROMPT"`,
 		PromptMode:      PromptModeHeadless,
+		InstallCmd:      "npm install -g opencode-ai",
+		InstallViaNPM:   true,
 		APIKeyEnvVars:   []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "XAI_API_KEY"},
 		AuthHintEnvVars: []string{"GITHUB_TOKEN", "LOCAL_ENDPOINT", "AZURE_OPENAI_ENDPOINT", "AWS_ACCESS_KEY_ID", "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "VERTEXAI_PROJECT"},
 		AuthOptional:    true,
@@ -543,6 +571,8 @@ var agents = map[string]*Definition{
 		InteractiveCmd: "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
 		HeadlessCmd:    `codex exec --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust "PROMPT"`,
 		PromptMode:     PromptModeInteractive,
+		InstallCmd:     "npm install -g @openai/codex",
+		InstallViaNPM:  true,
 		APIKeyEnvVars:  []string{"CODEX_API_KEY", "OPENAI_API_KEY"},
 		Broker: &BrokerConfig{ //nolint:gosec // G101 false positive: env-var NAMES + a placeholder, not real credentials
 			UpstreamURL: "https://api.openai.com",

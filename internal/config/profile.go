@@ -24,7 +24,14 @@ import (
 // profile parser only adds handlers for the profile-only keys (IC2 fold).
 type ProfileConfig struct {
 	YoloaiConfig
-	Backend     string          // optional backend constraint (different from container_backend)
+	Backend string // optional backend constraint (different from container_backend)
+	// Base names the image the profile's assembled image is built FROM instead of
+	// the default yoloai-base: "yoloai-minimal" (an embedded lean stack),
+	// "image:<ref>" (an existing image used as-is), or "dockerfile:<file>" (a
+	// Dockerfile in the profile dir). Empty keeps today's behaviour (FROM
+	// yoloai-base, no re-layer). Only meaningful on OCI backends.
+	Base        string
+	Agents      []string        // agent CLIs to bake on a custom base; nil defaults to the resolved agent
 	Workdir     *ProfileWorkdir // nil if not specified
 	Directories []ProfileDir    // empty if not specified
 }
@@ -66,6 +73,8 @@ type MergedConfig struct {
 	Setup              []string          `json:"setup,omitempty"`                // additive across chain (Docker only)
 	AutoCommitInterval int               `json:"auto_commit_interval,omitempty"` // profile overrides default
 	Isolation          string            `json:"isolation,omitempty"`            // last non-empty wins across chain
+	Base               string            `json:"base,omitempty"`                 // last non-empty wins across chain (custom base image)
+	Agents             []string          `json:"agents,omitempty"`               // replacement-wins from nearest profile that sets it (baked agent set)
 }
 
 // ValidateProfileName validates a profile name.
@@ -137,6 +146,8 @@ type profileOnlyHandler func(cfg *ProfileConfig, val *yaml.Node, env map[string]
 // profileOnlyHandlers maps the three profile-only top-level keys to their handlers.
 var profileOnlyHandlers = map[string]profileOnlyHandler{
 	"backend":     handleProfileBackend,
+	"base":        handleProfileBase,
+	"agents":      handleProfileAgents,
 	"workdir":     handleProfileWorkdir,
 	"directories": handleProfileDirectories,
 }
@@ -147,6 +158,42 @@ func handleProfileBackend(cfg *ProfileConfig, val *yaml.Node, env map[string]str
 		return err
 	}
 	cfg.Backend = expanded
+	return nil
+}
+
+func handleProfileBase(cfg *ProfileConfig, val *yaml.Node, env map[string]string) error {
+	expanded, err := expandEnvBraced(val.Value, env)
+	if err != nil {
+		return err
+	}
+	cfg.Base = expanded
+	return nil
+}
+
+// handleProfileAgents parses `agents:` — either a YAML sequence (agents: [claude,
+// codex]) or a single scalar (agents: claude). An empty/absent key leaves Agents
+// nil, which the assembler reads as "default to the resolved agent"; an explicit
+// empty list (agents: []) is a deliberate "bake no agent" and is preserved as a
+// non-nil empty slice.
+func handleProfileAgents(cfg *ProfileConfig, val *yaml.Node, env map[string]string) error {
+	switch val.Kind {
+	case yaml.ScalarNode:
+		expanded, err := expandEnvBraced(val.Value, env)
+		if err != nil {
+			return err
+		}
+		cfg.Agents = []string{expanded}
+	case yaml.SequenceNode:
+		agents := make([]string, 0, len(val.Content))
+		for _, item := range val.Content {
+			expanded, err := expandEnvBraced(item.Value, env)
+			if err != nil {
+				return fmt.Errorf("agents[]: %w", err)
+			}
+			agents = append(agents, expanded)
+		}
+		cfg.Agents = agents
+	}
 	return nil
 }
 
@@ -265,6 +312,107 @@ func LoadProfile(layout Layout, name string) (*ProfileConfig, error) {
 // profile image, which ProfileImageTag scopes.
 const BaseImage = "yoloai-base"
 
+// MinimalBaseName is the reserved `base:` value selecting yoloAI's embedded lean
+// stack (a Debian base plus only what the runtime layer needs), assembled on
+// demand rather than pre-built like BaseImage.
+const MinimalBaseName = "yoloai-minimal"
+
+// BaseKind classifies a resolved `base:` value.
+type BaseKind int
+
+const (
+	// BaseDefault is the unset/default base: FROM yoloai-base, no re-layer — the
+	// current behaviour. Also selected by the explicit value "yoloai-base".
+	BaseDefault BaseKind = iota
+	// BaseMinimal is the embedded yoloai-minimal stack, assembled on demand.
+	BaseMinimal
+	// BaseExistingImage is an existing image used as-is (base: image:<ref>).
+	BaseExistingImage
+	// BaseDockerfile is a Dockerfile in the profile dir (base: dockerfile:<file>).
+	BaseDockerfile
+)
+
+// BaseRef is a parsed `base:` value: its kind plus the reference it carries (an
+// image ref for BaseImage, a filename for BaseDockerfile, empty otherwise).
+type BaseRef struct {
+	Kind  BaseKind
+	Value string
+}
+
+// IsCustom reports whether the base triggers profile-image assembly (anything
+// but the default FROM yoloai-base path).
+func (b BaseRef) IsCustom() bool { return b.Kind != BaseDefault }
+
+// ParseBaseRef parses a profile's `base:` value into a BaseRef. An empty value
+// or "yoloai-base" is BaseDefault. "yoloai-minimal", "image:<ref>", and
+// "dockerfile:<file>" are the three custom forms. Any other value — including an
+// image:/dockerfile: prefix with an empty reference — is a usage error, so a
+// typo'd base fails loudly at config time rather than assembling a broken image.
+func ParseBaseRef(base string) (BaseRef, error) {
+	switch {
+	case base == "" || base == BaseImage:
+		return BaseRef{Kind: BaseDefault}, nil
+	case base == MinimalBaseName:
+		return BaseRef{Kind: BaseMinimal}, nil
+	case strings.HasPrefix(base, "image:"):
+		ref := strings.TrimPrefix(base, "image:")
+		if ref == "" {
+			return BaseRef{}, yoerrors.NewUsageError("base: image: requires an image reference")
+		}
+		return BaseRef{Kind: BaseExistingImage, Value: ref}, nil
+	case strings.HasPrefix(base, "dockerfile:"):
+		file := strings.TrimPrefix(base, "dockerfile:")
+		if file == "" {
+			return BaseRef{}, yoerrors.NewUsageError("base: dockerfile: requires a filename")
+		}
+		if strings.ContainsAny(file, "/\\") || file == ".." {
+			return BaseRef{}, yoerrors.NewUsageError("base: dockerfile:%s must be a filename in the profile directory, not a path", file)
+		}
+		return BaseRef{Kind: BaseDockerfile, Value: file}, nil
+	default:
+		return BaseRef{}, yoerrors.NewUsageError("unknown base %q: expected yoloai-base, yoloai-minimal, image:<ref>, or dockerfile:<file>", base)
+	}
+}
+
+// CustomBaseBuild is the resolved custom-base assembly input for one profile
+// image, computed from its merged config and handed to the backend builder. It
+// is nil for the default (FROM yoloai-base) path; non-nil selects assembly of
+// FROM <base> + the profile's stack + the agent installs + the runtime layer.
+type CustomBaseBuild struct {
+	// Base is the parsed base reference (yoloai-minimal, image:<ref>, or
+	// dockerfile:<file>). Never BaseDefault — a default base leaves this nil.
+	Base BaseRef
+	// Agents is the resolved, non-empty set of agent CLIs to bake, already
+	// defaulted to the profile's resolved agent when the profile set none.
+	Agents []string
+}
+
+// ResolveCustomBaseBuild turns a profile's merged config into a CustomBaseBuild,
+// or (nil, nil) when the profile uses the default base. It parses `base:`, and
+// defaults an empty `agents:` to the profile's resolved agent (the single-agent
+// size win) — erroring if a custom base resolves to no agent at all, since an
+// image with no working agent is never what the user meant.
+func ResolveCustomBaseBuild(merged *MergedConfig) (*CustomBaseBuild, error) {
+	ref, err := ParseBaseRef(merged.Base)
+	if err != nil {
+		return nil, err
+	}
+	if !ref.IsCustom() {
+		return nil, nil //nolint:nilnil // (nil, nil) is the documented "default base" signal
+	}
+	agents := merged.Agents
+	if agents == nil {
+		if merged.Agent == "" {
+			return nil, yoerrors.NewUsageError("base %q needs an agent to bake, but the profile resolves to no agent; set agents: or agent:", merged.Base)
+		}
+		agents = []string{merged.Agent}
+	}
+	if len(agents) == 0 {
+		return nil, yoerrors.NewUsageError("base %q requires at least one agent in agents:", merged.Base)
+	}
+	return &CustomBaseBuild{Base: ref, Agents: agents}, nil
+}
+
 // ProfileImageTag returns the principal-scoped Docker image tag for a
 // principal-authored profile image: "yoloai-<principal>-<profileName>". A
 // principal-authored build artifact needs a principal-scoped tag (see
@@ -279,8 +427,9 @@ func ProfileImageTag(layout Layout, profileName string) string {
 
 // ResolveProfileImage returns the Docker image tag for a sandbox using the
 // given profile. Walks the chain from child to root, returning the
-// principal-scoped tag of the most-derived profile that has a Dockerfile.
-// Falls back to BaseImage if none has a Dockerfile.
+// principal-scoped tag of the most-derived profile that produces its own image —
+// one that has a Dockerfile or sets a custom `base:`. Falls back to BaseImage if
+// none does.
 func ResolveProfileImage(layout Layout, profileName string, chain []string) string {
 	// Walk from most-derived (last) to root (first), skip "base"
 	for _, name := range slices.Backward(chain) {
@@ -288,11 +437,27 @@ func ResolveProfileImage(layout Layout, profileName string, chain []string) stri
 		if name == "base" {
 			continue
 		}
-		if ProfileHasDockerfile(layout, name) {
+		if profileProducesImage(layout, name) {
 			return ProfileImageTag(layout, name)
 		}
 	}
 	return BaseImage
+}
+
+// profileProducesImage reports whether a profile builds its own image rather than
+// running on an ancestor's: true when it has a Dockerfile or sets a custom base.
+// A malformed config is treated as "Dockerfile only" — image resolution is not
+// the place to surface a `base:` parse error, which the build path reports.
+func profileProducesImage(layout Layout, name string) bool {
+	if ProfileHasDockerfile(layout, name) {
+		return true
+	}
+	cfg, err := LoadProfile(layout, name)
+	if err != nil {
+		return false
+	}
+	ref, err := ParseBaseRef(cfg.Base)
+	return err == nil && ref.IsCustom()
 }
 
 // ResolveProfileChain walks the extends chain from the given profile back to
@@ -451,10 +616,18 @@ func applyProfileToMerged(merged *MergedConfig, profile *ProfileConfig) {
 	merged.ContainerBackend = mergeStringField(merged.ContainerBackend, profile.ContainerBackend)
 	merged.TartImage = mergeStringField(merged.TartImage, profile.TartImage)
 	merged.Isolation = mergeStringField(merged.Isolation, profile.Isolation)
+	merged.Base = mergeStringField(merged.Base, profile.Base)
 
 	// AgentFiles: replacement semantics
 	if profile.AgentFiles != nil {
 		merged.AgentFiles = profile.AgentFiles
+	}
+	// Agents: replacement-wins from the nearest profile that sets it. An agent
+	// *set* is not additively composed — a child asking for [codex] means codex,
+	// not codex plus the parent's agents. profile.Agents is non-nil exactly when
+	// this profile declared `agents:`, so the child (applied last) wins.
+	if profile.Agents != nil {
+		merged.Agents = profile.Agents
 	}
 	// AutoCommitInterval: non-zero wins
 	if profile.AutoCommitInterval > 0 {
@@ -538,6 +711,23 @@ func ValidateProfileBackend(profileBackend, resolvedBackend string) error {
 	}
 	if profileBackend != resolvedBackend {
 		return fmt.Errorf("profile requires backend %q but resolved backend is %q", profileBackend, resolvedBackend)
+	}
+	return nil
+}
+
+// ValidateProfileBase checks that a custom `base:` is usable on the resolved
+// backend. It also parses the value, so a malformed base: surfaces here even on a
+// supported backend. supportsImageBuild is the backend's OCI-image capability
+// (Descriptor().Capabilities.CapAdd, the same gate EnsureProfileImage uses):
+// Tart VMs and Seatbelt have no image concept, so a custom base is a clear usage
+// error there rather than a silently-ignored key.
+func ValidateProfileBase(base string, supportsImageBuild bool) error {
+	ref, err := ParseBaseRef(base)
+	if err != nil {
+		return err
+	}
+	if ref.IsCustom() && !supportsImageBuild {
+		return yoerrors.NewUsageError("base: %q needs an image-building backend (docker/podman); the current backend has no OCI image concept", base)
 	}
 	return nil
 }

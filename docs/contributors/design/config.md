@@ -157,7 +157,7 @@ Profiles live in `~/.yoloai/profiles/<name>/` and are always selected explicitly
 ```
 ~/.yoloai/profiles/<name>/
 ├── config.yaml   ← profile settings (all optional; merged over baked-in defaults)
-├── Dockerfile    ← optional; must use FROM yoloai-base
+├── Dockerfile    ← optional; FROM yoloai-base by default, or FROM-less when base: is set
 └── tmux.conf     ← optional; replaces baked-in default
 ```
 
@@ -169,21 +169,30 @@ Profiles live in `~/.yoloai/profiles/<name>/` and are always selected explicitly
 
 **Name validation:** Profile names must match `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`, max 56 characters. Profile names become Docker image tags (`yoloai-cli-<profile>`), so the character restrictions ensure compatibility with Docker's naming rules.
 
-**Implemented profile fields:** `agent`, `model`, `os`, `container_backend`, `tart.image`, `env`, `agent_args`, `agent_files`, `ports`, `workdir`, `directories`, `resources`, `network`, `mounts`, `isolation`, `cap_add`, `devices`, `setup`, `auto_commit_interval`. Unknown fields are an error — `yoloai new` fails with a clear message listing the unrecognized keys. This catches typos and fields that have been renamed.
+**Implemented profile fields:** `agent`, `model`, `os`, `container_backend`, `base`, `agents`, `tart.image`, `env`, `agent_args`, `agent_files`, `ports`, `workdir`, `directories`, `resources`, `network`, `mounts`, `isolation`, `cap_add`, `devices`, `setup`, `auto_commit_interval`. Unknown fields are an error — `yoloai new` fails with a clear message listing the unrecognized keys. This catches typos and fields that have been renamed.
+
+**Custom base images (`base` / `agents`).** By default a profile's image is built `FROM yoloai-base` (or runs on `yoloai-base` directly when it has no Dockerfile). `base:` replaces that starting point, and yoloAI assembles the profile image as `FROM <base>` + the profile's (FROM-less) `Dockerfile` stack additions + the selected agents' installs + yoloAI's runtime layer:
+
+- `base: yoloai-base` — the default; unchanged behaviour.
+- `base: yoloai-minimal` — an embedded lean stack (a Debian base plus only what the runtime layer needs), assembled on demand. ~1.7 GB lighter than `yoloai-base` because it bakes no unused agent CLIs or Go/Rust/clang toolchains.
+- `base: image:<ref>` — an existing image used **as-is** (e.g. `image:ghcr.io/lab/r-bioc:1.2`). The image needs to know nothing about yoloAI; the runtime layer is appended to make it drivable. Must be a Debian/Ubuntu (apt) userland — a non-apt base fails the build with a clear error (run `yoloai system verify-image` to check a candidate).
+- `base: dockerfile:<file>` — a Dockerfile in the profile directory used as the base (it carries its own `FROM`).
+
+`agents:` selects which agent CLIs are baked into a custom-base image (`agents: [claude, codex]`, or a scalar `agents: claude`). It defaults to the profile's single resolved agent — the size win — and is **only meaningful on a custom base** (on `yoloai-base` all five agents are already present and cannot be un-baked). When `base:` is set, the profile `Dockerfile` must be **FROM-less** (yoloAI supplies the `FROM`); a `Dockerfile` that carries its own `FROM` while `base:` is set is a build error. `base:` requires an image-building backend (Docker, Podman, or Apple `container`) — it is a usage error on Tart and Seatbelt, which have no OCI image concept.
 
 **Machine-specific fields — fail loudly if prerequisites are absent.** `isolation` and `os` select runtime environments that may not be available on every machine. `isolation: vm` uses Kata Containers on Linux (requires KVM) and Tart on macOS (requires Tart installed). `isolation: vm-enhanced` is Linux-only and additionally requires Firecracker. `isolation: container-privileged` requires a container backend (Docker/Podman) and runs on both Linux and macOS hosts via that backend's Linux VM; it is only unavailable with `os: mac` (Seatbelt/Tart have no privileged mode). `os: linux` is the default and works everywhere. `os: mac` requires a macOS host; the specific backend depends on `isolation` (`container` → Seatbelt, `vm` → Tart). All other isolation levels may also have prerequisites (e.g. `container-enhanced` requires gVisor). If the required prerequisites are not present, `yoloai new` fails with a clear error — it does not silently fall back to a different mode. A profile that specifies `isolation` or `os` will not work everywhere.
 
 **Backend handling:**
 - `os` — optional. Selects the guest OS for the sandbox. Valid values: `linux` (default), `mac`. `linux` is the default and requires no special hardware. `mac` requires a macOS host; the backend depends on `isolation`: `container` uses Seatbelt, `vm` uses Tart. Fails loudly on non-macOS hosts or if the required backend is not installed. CLI `--os` overrides.
 - `container_backend` — optional preference. Only meaningful for `--isolation container` or `container-enhanced`; ignored for `vm`, `vm-enhanced`, and `--os mac`.
-- `Dockerfile` — optional. Used with Docker, Podman, and Apple `container` backends to build a `yoloai-<profile>` image (`container build`, mirroring `docker build`/`podman build`). Must use `FROM yoloai-base`. Ignored with Tart and Seatbelt backends (no OCI image concept). When absent, image-based backends use `yoloai-base`. The Apple backend has no `--secret` build-secret support (unlike Docker/Podman's BuildKit invocation): any auto-detected secrets (e.g. `~/.npmrc`) are reported and dropped rather than passed through.
+- `Dockerfile` — optional. Used with Docker, Podman, and Apple `container` backends to build a `yoloai-<profile>` image (`container build`, mirroring `docker build`/`podman build`). Uses `FROM yoloai-base` by default; when `base:` is set it must be **FROM-less** (yoloAI supplies the `FROM`). Ignored with Tart and Seatbelt backends (no OCI image concept). When absent (and no `base:`), image-based backends use `yoloai-base`. The Apple backend has no `--secret` build-secret support (unlike Docker/Podman's BuildKit invocation): any auto-detected secrets (e.g. `~/.npmrc`) are reported and dropped rather than passed through.
 - `tart.image` — optional. Used only with the Tart backend. Ignored with other backends.
 
 **Sandbox metadata:** When a profile is used, `environment.json` records the profile name and the resolved image ref. Lifecycle commands use the stored image ref — profile changes only take effect on new sandboxes.
 
 **Profile image building:** The sandbox manager calls `Runtime.EnsureImage()` for the base image, then uses container-backend build logic for profile images when Docker or Podman is active and the profile has a Dockerfile. Tart and Seatbelt skip profile image building.
 
-**Profile image staleness:** A profile image is considered stale when: (a) it doesn't exist, (b) the profile's Dockerfile has changed since last build (checksum-tracked), or (c) `yoloai-base` has been rebuilt since the profile image was last built. Stale images are automatically rebuilt during `yoloai new --profile`.
+**Profile image staleness:** A profile image is considered stale when: (a) it doesn't exist, (b) the profile's build inputs have changed since last build (checksum-tracked), or (c) `yoloai-base` has been rebuilt since the profile image was last built. For a custom base the checksum covers the assembled Dockerfile — the base ref, `agents:`, the profile's stack additions, and yoloAI's runtime layer — so editing `base:` or `agents:` triggers a rebuild (one gap: a moving remote tag behind `base: image:<ref>` is only re-resolved on `--rebuild`). Stale images are automatically rebuilt during `yoloai new --profile`.
 
 **`config.yaml` format:**
 
@@ -194,6 +203,10 @@ Profiles live in `~/.yoloai/profiles/<name>/` and are always selected explicitly
 # container_backend: docker               # preferred container backend; only applies to container/container-enhanced isolation
 agent: claude                             # override agent
 # model: sonnet                           # override model
+# base: yoloai-minimal                    # custom base image (Docker/Podman only): yoloai-base
+#                                         # (default), yoloai-minimal, image:<ref>, dockerfile:<file>
+# agents:                                 # agent CLIs baked into a custom-base image
+#   - claude                              # (defaults to this profile's resolved agent)
 # tart:
 #   image: my-custom-vm                   # custom VM image (tart only)
 ports:
@@ -260,6 +273,8 @@ CLI workdir **replaces** profile workdir. CLI `-d` dirs are **additive** with pr
 | `container_backend`    | Profile overrides baked-in. Selects Linux container backend (docker/podman); works on Linux and macOS. Ignored for `vm`, `vm-enhanced`, and `os: mac`. CLI `--backend` overrides. |
 | `agent`                | Profile overrides baked-in. CLI `--agent` overrides.                                 |
 | `model`                | Profile overrides baked-in. CLI `--model` overrides.                                 |
+| `base`                 | Profile overrides baked-in (last non-empty wins). Image backends only (Docker/Podman/Apple `container`); usage error on Tart/Seatbelt. |
+| `agents`               | Profile **replaces** (nearest profile that sets it wins; not additive). Only meaningful with a custom `base`. |
 | `os`                   | Profile overrides baked-in. CLI `--os` overrides. Valid: `linux` (default), `mac`. `mac` requires macOS host; backend depends on `isolation` (`container` → Seatbelt, `vm` → Tart). Fails loudly on non-macOS hosts. |
 | `isolation`            | Profile overrides baked-in. CLI `--isolation` overrides. Valid: `container`, `container-enhanced`, `container-privileged`, `vm`, `vm-enhanced`. Backend is host-dependent (`vm` → Kata on Linux, Tart on macOS; `container-privileged` → Docker/Podman, on both hosts via the Linux VM, not with `os: mac`); fails loudly if prerequisites absent. |
 | `tart.image`           | Profile overrides baked-in.                                                           |

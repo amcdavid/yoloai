@@ -7,9 +7,68 @@
 
 - **Status:** IN-PROGRESS — Phase 0 built (internal/imagecontract, the composed
   runtime layer proving the split, the tart contract-check dedup, and `yoloai
-  system verify-image` on the OCI backends). Phases 1 (`yoloai-minimal`) and 2
-  (`base:`/`agents:`) not started.
+  system verify-image` on the OCI backends). Phase 2 (`base:`/`agents:`) built on
+  `feat/pluggable-base` and unit-tested; `yoloai-minimal` folded into it as a
+  named base rather than a separate phase (see below). **Live container-build
+  validation still pending** (the host has no docker/hadolint/golangci-lint, and
+  the apple builder has the terminal-COPY bug) — the assembly is covered by unit
+  tests, not yet an end-to-end build. Phase 3 (authoring skill) not started.
 - **Depends on:** —
+
+## Phase 2 — as built (2026-07-21)
+
+Landed on `feat/pluggable-base` (off Phase 0's `feat/image-contract`):
+
+- **`InstallCmd`/`InstallViaNPM` on `agent.Definition`** (`internal/agent/agent.go`),
+  populated for every real agent; `agent.InstallDockerfile(names)`
+  (`internal/agent/install.go`) renders the install fragment, emitting the Node
+  prerequisite once for the npm agents and one shared retry loop.
+- **`base:`/`agents:` config keys** — parsed in `internal/config/profile.go`
+  (handlers + `MergedConfig` + `ResolvedProfileConfig` + `profile info` render +
+  scaffold), with `base:` last-non-empty-wins and `agents:` replacement-wins.
+- **`config.ParseBaseRef` / `BaseRef` / `CustomBaseBuild` / `ResolveCustomBaseBuild`**
+  — the four base forms as data, and the merged-config → build-spec resolution
+  (agents default to the resolved agent).
+- **Assembly** in `runtime/docker` — `AssembleCustomBaseDockerfile` +
+  `assemble.go`'s `resolveStackHalf` (yoloai-minimal / image: / dockerfile:),
+  `resources/minimal.Dockerfile` embedded, the runtime-layer COPY files injected
+  into the custom-base build context, and `profileBuildChecksum` extended to hash
+  the assembled Dockerfile.
+- **Wiring** — the `ProfileImageBuilder` interface and `EnsureProfileImage` now
+  thread the `*CustomBaseBuild` spec and build a `base:`-only profile even without
+  a Dockerfile; `ResolveProfileImage` gives such a profile its own image tag.
+- **Validation** — `config.ValidateProfileBase` (custom base needs an
+  image-building backend; malformed base fails loudly) wired into the create path;
+  a FROM in a base:-mode profile Dockerfile is rejected at assembly.
+- **Docs** — `config.md` documents both keys, the four base forms, the FROM-less
+  rule, and the staleness coverage.
+
+**Known gap (not filed in the maintainer's findings register — fork work):** for
+`base: image:<ref>`, a moving *remote* tag is not re-resolved until `--rebuild`;
+the checksum tracks the ref string and the assembled bytes, not the pulled digest.
+Documented in `profileBuildChecksum`'s comment and `config.md`.
+
+## Decisions (2026-07-21)
+
+Two questions settled the shape of the remaining work:
+
+- **`base:` is profile-scoped, not a system-wide swap.** It operates at the
+  *profile-image* layer, reusing the existing `BuildProfileImage` machinery, and
+  leaves `yoloai-base` and the ~25 sites that hardcode its name untouched. A
+  profile with a non-default `base:` builds its own standalone image (base +
+  stack + agent installs + runtime layer); the default `yoloai new` and every
+  existing profile are unchanged. A *global* default-base setting was considered
+  and deferred — profiles are the customization surface, and per-profile covers
+  "bring your own base". This is what collapses the earlier "Phase 1 then Phase
+  2" into one lift: `yoloai-minimal` is not a separate system base to swap in,
+  it is just a named base a profile can point at.
+
+- **`agents:` defaults to a single agent — and this is NOT a breaking change.**
+  Because `base:` is profile-scoped, `yoloai-base` still bakes all five agents,
+  so the single-agent default only governs images built on a *custom* base — a
+  brand-new feature with no existing users. Nothing that works today changes. A
+  `--agent X` against a custom-base image that did not bake X is a rebuild
+  prompt, not a regression of prior behaviour.
 
 ## Problem
 
@@ -266,71 +325,80 @@ No user-visible change; converts the implicit contract into something checkable.
   binary up front and fail with "not baked into this image; add it to `agents:` and rebuild"
   rather than the current bare miss at `sandbox-setup.py:926`.
 
-### Phase 1 — `yoloai-minimal` as a second embedded base
+### Phase 2 — user-declared bases and selectable agents (`feat/pluggable-base`)
 
-`runtime/docker/resources/Dockerfile.minimal` = tier 1 (features included) + one agent + the
-runtime layer. No language toolchains. Select with `yoloai system build --base minimal`.
-
-Which agent it defaults to is a packaging choice, not an architectural one — the Dockerfile
-takes it as a build arg, and the size follows from the table in §Measured (~1.1 GB with an
-npm-installed agent, ~1.6 GB with aider). The point of the image is to be the smallest thing
-that satisfies the contract, whichever agent that is.
-
-This exists as much to **validate Phase 0** as to ship: if `yoloai-minimal` boots and drives its
-agent, the contract is complete. If not, we learn it here rather than in a user's domain image.
-Land it green in smokes before Phase 2, and record its real measured size to settle the DinD
-open question in §Measured.
-
-### Phase 2 — user-declared bases and selectable agents
+Both keys are profile-scoped and build through the existing profile-image path, so
+`yoloai-base` and its ~25 backend sites are never touched. `yoloai-minimal` is a named base a
+profile points at, not a system base to swap — which is why the earlier standalone Phase 1
+folds in here.
 
 **`base:` key** in profile `config.yaml`:
 
 ```yaml
-base: yoloai-base                      # default, current behaviour
-base: yoloai-minimal                   # the Phase 1 image
+base: yoloai-base                      # default, current behaviour (FROM yoloai-base, no re-layer)
+base: yoloai-minimal                   # embedded minimal stack, built on demand
 base: image:ghcr.io/lab/r-stack:1.2    # an existing image, unmodified (§2a mode 2)
 base: dockerfile:Base.Dockerfile       # a Dockerfile in the profile dir
 ```
 
-For the latter two, yoloAI builds the user's image then appends the Phase 0 runtime layer as a
-final stage, subject to the foreign-base assumptions in §2a. The user's Dockerfile never needs
-to know anything about yoloAI — which is the point, and what makes an existing domain image
-usable as-is.
+For every value except the default, yoloAI assembles the profile image as `FROM <base>` + the
+profile's (FROM-less) stack steps + the `agents:` installs + the Phase 0 runtime layer, then
+builds it with `BuildProfileImage` under the profile's own tag. The default keeps today's exact
+behaviour: `FROM yoloai-base`, which already carries the runtime layer, so it is not re-applied.
+The user's own Dockerfile never needs to know anything about yoloAI — the point that makes an
+existing domain image usable as-is.
 
-**`agents:` key** — the one configurable dimension of yoloAI's own layer:
+**Base × profile-Dockerfile coexistence.** When `base:` is set, the profile Dockerfile is
+FROM-less (stack additions only) and yoloAI injects the `FROM` and appends the runtime layer.
+When `base:` is unset, the profile Dockerfile keeps its required `FROM yoloai-base` and current
+behaviour — no re-layering. A profile Dockerfile that carries its own `FROM` *and* sets `base:`
+is a validation error.
+
+**`agents:` key** — which agents the assembled image bakes:
 
 ```yaml
-agents: [claude]        # default: [<resolved agent>]; any subset of the catalog
+agents: [claude]        # default on a custom base: [<the profile's resolved agent>]
 ```
 
-This requires adding an **`InstallCmd` to `agent.Definition`**, which today has no install field
-despite its doc comment promising one ("describes an agent's install, launch, and behavioral
-characteristics") — the install is hardcoded in the Dockerfile's `npm install -g` line. Moving
-it into the definition is what makes the set selectable at all, and it keeps each agent's
-install colocated with the rest of its declaration rather than in a Dockerfile that knows about
-all five. The generated runtime layer installs the declared agents; the shared Node prerequisite
-is included only if a declared agent needs it. Switching `--agent` to one not baked becomes a
-clear preflight error rather than a `which` miss.
+Only meaningful on a custom base (on `yoloai-base` the five agents are already present and
+cannot be un-layered). Defaults to the single resolved agent — the size win — and is not a
+breaking change (see Decisions above). Needs an **`InstallCmd` on `agent.Definition`**, which
+the struct's own doc comment already promises ("describes an agent's install…") but which does
+not exist — the install is hardcoded in the base Dockerfile's `npm install -g` line. Moving it
+into each agent's definition is what makes the set selectable and colocates the install with the
+rest of the declaration. `node` is a shared prerequisite, emitted once if any declared agent is
+npm-based.
 
 Surfaces that must change — each is a real coupling:
 
 - `internal/config/profile.go` — `ProfileConfig`/`MergedConfig` gain `Base` and `Agents`;
-  handlers in `yoloaiConfigHandlers`; `Base` merges last-non-empty-wins (matching `Backend`),
-  `Agents` additively (matching `Ports`).
-- `ResolveProfileImage` — must consider `base:`, not only "does a Dockerfile exist".
+  profile-only handlers; `Base` merges last-non-empty-wins (matching `Backend`), `Agents`
+  replacement-wins from the nearest profile that sets it (an agent *set* is not additively
+  composed — a child asking for `[codex]` means codex, not codex-plus-parent's-agents).
+- `ResolveProfileImage` — a profile with `base:` set has its own image even without a Dockerfile
+  (the base itself is the customization), so image resolution keys on `base:` too, not only
+  "does a Dockerfile exist".
 - **`profileBuildChecksum` must include the base ref, the agent set, and the runtime-layer
-  checksum.** As written it hashes the profile Dockerfile alone, so editing `base:` or `agents:`
-  in `config.yaml` would not trigger a rebuild — and `config.yaml` is explicitly excluded from
-  the build context (`createProfileBuildContext`). This is the easiest bug to ship here.
-- `com.yoloai.managed` — free today via `FROM yoloai-base`. A foreign base does not carry it, so
-  the generated layer must stamp it, or `system prune --images` loses these images once it
-  becomes label-scoped (`deprecations.md:194`).
+  checksum.** It hashes the profile Dockerfile alone today, and `config.yaml` is excluded from
+  the build context (`createProfileBuildContext`) — so without this, editing `base:` or `agents:`
+  would not trigger a rebuild. Easiest bug to ship here.
+- For `base: image:<ref>`, staleness also tracks the resolved **digest** (not the tag, which
+  moves), matching the devcontainer-wrapper precedent in `environments.md`; `--pull` forces a
+  re-resolve.
+- `com.yoloai.managed` — free today via `FROM yoloai-base`. A foreign base does not carry it;
+  the runtime layer (Phase 0) already stamps it, so a custom-base image gets it via the appended
+  layer. Verified present by construction.
 - `profileScaffold` (`profile.go:24`) — document both new keys.
 - `ProfileInfo` / `profile info` — report the resolved base and agent set.
-- **Apple backend has no `--secret` support** (`config.md:179`); the generated layer must never
-  require a build secret. It doesn't — keep it that way.
-- **Tart and seatbelt have no OCI image concept.** `base:` must be a clear validation error
-  there, not silently ignored.
+- **Apple has no `--secret` support** (`config.md:179`); the assembled layer must never require a
+  build secret. It doesn't — keep it that way.
+- **Tart and seatbelt have no OCI image concept.** `base:` is a clear validation error there.
+
+**Foreign-base failure policy.** The runtime layer assumes a Debian/Ubuntu apt userland, a free
+`yoloai`/UID-1001 (guarded — it reuses an existing account), and that `ENTRYPOINT` is yoloAI's
+to take. A non-Debian base (RHEL, Alpine) is not detected-and-branched; it fails `verify-image`
+with a clear message. Documenting + failing clearly beats a detection matrix that pretends to
+support bases it has not been tested against.
 
 ### Phase 3 — the authoring skill
 
@@ -342,31 +410,37 @@ That gives the agent a real success signal instead of prose.
 
 ## Incidental findings
 
-Independent of this plan, worth fixing:
+Landed on `fix/base-image-gocache` (a separate branch off `main`, independent of Phase 0):
 
-- **~500 MB of dead Go build cache in the base.** `golangci-lint` measured 706 MB installed. The
-  Dockerfile cleans `GOPATH=/tmp/gopath` (line 117) but never `GOCACHE` (`/root/.cache/go-build`).
-  Inferred from the size rather than isolated directly — confirm before acting.
-- **`dnsutils` is dead weight** (8 MB). Nothing calls `dig`; `firewall.py:74` uses
-  `socket.getaddrinfo`. `standards/dockerfile.md:126` still claims otherwise.
-- **`standards/dockerfile.md:151-159`** claims entrypoint scripts are bind-mounted so the base
-  needs no rebuild when they change. True for **seatbelt and tart only** (`config.BinDirName`
-  staging); container backends bake them via `COPY`, which is why `buildInputsChecksum` exists.
-- **`design/environments.md:162`** describes devcontainer `build.dockerfile` auto-layering onto
-  an arbitrary base; `devcontainer.go:64` marks that field "not used yet".
-- **`Dockerfile:134` cites `docs/dev/research/implementation.md`, which does not exist.** The
-  Bun/proxy rationale survives only in that comment and should be rehomed — it is load-bearing
-  (§1) and currently undiscoverable.
+- **~640 MB of dead Go build cache + 77 MB npm cache** removed from the base. `go install` wrote
+  to `$HOME/.cache/go-build` (GOCACHE, uncleaned) and npm kept every tarball under `$HOME/.npm`.
+  Confirmed by measurement, not inference: 640 MB against a 50 MB golangci-lint binary.
+- **`standards/dockerfile.md`** corrected: agent CLIs are baked (not installed at create time);
+  entrypoint scripts are bind-mounted for seatbelt/tart only (container backends `COPY` them,
+  which is why `buildInputsChecksum` exists); `dnsutils`/`dig` is unused (`firewall.py` uses
+  `socket.getaddrinfo`).
+- **`Dockerfile` Bun/proxy rationale** rehomed inline; it had cited a nonexistent
+  `docs/dev/research/implementation.md`.
 
-## Recommended sequencing
+Still open:
 
-Phase 0 alone delivers most of the value: the contract becomes explicit, silent boot failures
-become diagnostics, and it is a pure refactor with no API change. Phase 1 validates it cheaply.
-Phase 2 is the user-visible feature and should not start until `yoloai-minimal` is green in
-smokes. Phase 3 is optional polish.
+- **`design/environments.md`** describes devcontainer `build.dockerfile` auto-layering onto an
+  arbitrary base; `devcontainer.go` marks that field "not used yet". This is a design doc for
+  intended behaviour, not a stale claim — left as-is, but note it overlaps §2a mode 2 and should
+  be reconciled with `base: dockerfile:` when Phase 2 lands.
 
-Note that **`agents:` (Phase 2) is separable from `base:` and carries most of the size win** —
-~1.7 GB of unbaked agent CLIs for a single-agent profile, against 373 MB for the entire feature
-closure. It also needs none of the foreign-base machinery in §2a. If Phase 2 must be split for
-scheduling, ship `agents:` first: it is the larger win, the smaller change, and it benefits
-every user regardless of which agent or stack they prefer.
+## Sequencing (as built)
+
+- **`fix/base-image-gocache`** (off `main`) — the cache/doc cleanup. Independent; mergeable alone.
+- **`feat/image-contract`** (off `main`) — Phase 0. Complete and validated: the contract as data,
+  the composed runtime layer proving the split, the tart dedup, and `verify-image`.
+- **`feat/pluggable-base`** (off `feat/image-contract`) — Phase 2. In progress.
+
+`agents:` and `base:` ship together here rather than split: under the profile-scoped decision
+they share one assembly path (`FROM <base>` + stack + agent installs + runtime layer), so
+splitting them would mean building that path twice. Phase 3 (the authoring skill) stays optional
+polish, gated on Phase 0's `verify-image` as the agent's success signal.
+
+Original note, still true: **`agents:` carries most of the size win** — ~1.7 GB of unbaked agent
+CLIs for a single-agent custom-base image, against 373 MB for the entire feature closure. It
+benefits every user regardless of which agent or stack they prefer.

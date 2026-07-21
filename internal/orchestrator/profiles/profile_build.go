@@ -24,9 +24,9 @@ import (
 // it does not inherit os.Environ. A multi-principal embedder thus controls
 // exactly which env each principal's profile build sees.
 type ProfileImageBuilder interface {
-	BuildProfileImage(ctx context.Context, sourceDir string, tag string, secrets []string, buildEnv config.Layout, output io.Writer, logger *slog.Logger) error
-	ProfileImageNeedsBuild(profileDir string, parentDir string) bool
-	RecordProfileBuildChecksum(profileDir string)
+	BuildProfileImage(ctx context.Context, sourceDir string, tag string, custom *config.CustomBaseBuild, secrets []string, buildEnv config.Layout, output io.Writer, logger *slog.Logger) error
+	ProfileImageNeedsBuild(profileDir string, custom *config.CustomBaseBuild, parentDir string) bool
+	RecordProfileBuildChecksum(profileDir string, custom *config.CustomBaseBuild)
 }
 
 // EnsureProfileImage ensures that the Docker image for a profile and its
@@ -52,32 +52,50 @@ func EnsureProfileImage(ctx context.Context, rt runtime.Backend, layout config.L
 		return err
 	}
 
+	baseCfg, err := config.LoadBakedInDefaults()
+	if err != nil {
+		return fmt.Errorf("load baked-in defaults: %w", err)
+	}
+
 	// Ensure base image first
 	baseProfileDir := filepath.Join(layout.ProfilesDir(), "base")
 	if err := rt.Setup(ctx, layout, baseProfileDir, output, logger, force); err != nil {
 		return fmt.Errorf("ensure base image: %w", err)
 	}
 
-	// Walk chain from root to leaf, build each profile that has a Dockerfile
+	// Walk chain from root to leaf, build each profile that produces its own
+	// image — one with a Dockerfile, or one that sets a custom base:.
 	prevDir := baseProfileDir
-	for _, name := range chain {
+	for i, name := range chain {
 		if name == "base" {
 			continue
 		}
 
+		// Resolve this profile's merged config to learn its base/agents. The
+		// merge is over the chain up to and including this profile.
+		merged, err := config.MergeProfileChain(layout, baseCfg, chain[:i+1])
+		if err != nil {
+			return err
+		}
+		custom, err := config.ResolveCustomBaseBuild(merged)
+		if err != nil {
+			return fmt.Errorf("profile %q: %w", name, err)
+		}
+
 		profileDir := layout.ProfileDir(name)
-		if !config.ProfileHasDockerfile(layout, name) {
-			// No Dockerfile — skip, but pass along prevDir unchanged
+		if custom == nil && !config.ProfileHasDockerfile(layout, name) {
+			// Neither a Dockerfile nor a custom base — no image of its own; skip,
+			// passing prevDir along unchanged.
 			continue
 		}
 
 		tag := config.ProfileImageTag(layout, name)
-		if force || builder.ProfileImageNeedsBuild(profileDir, prevDir) {
+		if force || builder.ProfileImageNeedsBuild(profileDir, custom, prevDir) {
 			fmt.Fprintf(output, "Building profile image %s...\n", tag) //nolint:errcheck // best-effort output
-			if err := builder.BuildProfileImage(ctx, profileDir, tag, secrets, layout, output, logger); err != nil {
+			if err := builder.BuildProfileImage(ctx, profileDir, tag, custom, secrets, layout, output, logger); err != nil {
 				return fmt.Errorf("build profile image %s: %w", tag, err)
 			}
-			builder.RecordProfileBuildChecksum(profileDir)
+			builder.RecordProfileBuildChecksum(profileDir, custom)
 		}
 
 		prevDir = profileDir

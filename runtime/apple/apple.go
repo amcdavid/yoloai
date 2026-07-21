@@ -484,7 +484,7 @@ func (r *Runtime) buildBaseImage(ctx context.Context, layout config.Layout, outp
 // backend's BuildKit invocation), so any auto-detected build secrets (e.g. an
 // ~/.npmrc) are reported and dropped rather than silently ignored or failing
 // the build outright.
-func (r *Runtime) BuildProfileImage(ctx context.Context, sourceDir string, tag string, secrets []string, buildEnv config.Layout, output io.Writer, logger *slog.Logger) error {
+func (r *Runtime) BuildProfileImage(ctx context.Context, sourceDir string, tag string, custom *config.CustomBaseBuild, secrets []string, buildEnv config.Layout, output io.Writer, logger *slog.Logger) error {
 	if len(secrets) > 0 {
 		fmt.Fprintf(output, "Warning: build secrets are not supported on the apple backend; %d secret(s) will not be available to the build\n", len(secrets)) //nolint:errcheck // best-effort progress
 	}
@@ -495,7 +495,7 @@ func (r *Runtime) BuildProfileImage(ctx context.Context, sourceDir string, tag s
 	}
 	defer os.RemoveAll(dir) //nolint:errcheck // best-effort temp cleanup
 
-	if err := dockerrt.WriteProfileBuildContextDir(sourceDir, dir); err != nil {
+	if err := dockerrt.WriteProfileBuildContextDir(sourceDir, custom, dir); err != nil {
 		return fmt.Errorf("write profile build context: %w", err)
 	}
 	logger.Debug("building profile image via container build", "tag", tag, "sourceDir", sourceDir, "context", dir)
@@ -511,14 +511,14 @@ func (r *Runtime) BuildProfileImage(ctx context.Context, sourceDir string, tag s
 
 // ProfileImageNeedsBuild reports whether the profile image is stale. Delegates
 // to the docker backend's checksum scheme (pure file I/O, backend-agnostic).
-func (r *Runtime) ProfileImageNeedsBuild(profileDir string, parentDir string) bool {
-	return dockerrt.ProfileImageNeedsBuild(profileDir, parentDir)
+func (r *Runtime) ProfileImageNeedsBuild(profileDir string, custom *config.CustomBaseBuild, parentDir string) bool {
+	return dockerrt.ProfileImageNeedsBuild(profileDir, custom, parentDir)
 }
 
-// RecordProfileBuildChecksum records the profile's Dockerfile checksum after a
+// RecordProfileBuildChecksum records the profile's build-inputs checksum after a
 // successful build. Delegates to the docker backend's checksum scheme.
-func (r *Runtime) RecordProfileBuildChecksum(profileDir string) {
-	dockerrt.RecordProfileBuildChecksum(profileDir)
+func (r *Runtime) RecordProfileBuildChecksum(profileDir string, custom *config.CustomBaseBuild) {
+	dockerrt.RecordProfileBuildChecksum(profileDir, custom)
 }
 
 // Prune sweeps orphaned apple containers — `yoloai-*` instances (scoped to this
