@@ -27,6 +27,14 @@ var embeddedBatteries []byte
 //go:embed resources/runtime-layer.Dockerfile
 var embeddedRuntimeLayer []byte
 
+// embeddedMinimalStack is the lean stack half for `base: yoloai-minimal` — a
+// Debian base plus only the packages the runtime layer and agent installs need
+// (curl, gnupg, ca-certificates). Like embeddedBatteries it is NOT a complete
+// image; the assembler appends agent installs and the runtime layer.
+//
+//go:embed resources/minimal.Dockerfile
+var embeddedMinimalStack []byte
+
 //go:embed resources/entrypoint.sh
 var embeddedEntrypoint []byte
 

@@ -70,6 +70,9 @@ func resolveProfileConfig(ctx context.Context, d state.Deps, opts *Options, agen
 	if err := config.ValidateProfileBackend(merged.Backend, string(backend)); err != nil {
 		return nil, err
 	}
+	if err := config.ValidateProfileBase(merged.Base, d.Runtime.Descriptor().Capabilities.CapAdd); err != nil {
+		return nil, err
+	}
 
 	homeDir := d.Layout.HomeDir
 	if err := applyMergedProfileToOpts(opts, agentDef, merged, pr, ycfg.Agent, homeDir, d.Layout.Env().EnvForConfigInterpolation()); err != nil {

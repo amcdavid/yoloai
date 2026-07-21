@@ -227,17 +227,19 @@ func WriteBuildContextDir(dir string) error {
 	return nil
 }
 
-// createBuildContext creates an in-memory tar archive containing the
-// embedded Dockerfile and entrypoints.
-func createBuildContext() (io.Reader, error) {
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
+// contextFile is one entry in a build-context tar: its in-tar name and content.
+type contextFile struct {
+	tarName string
+	content []byte
+}
 
-	files := []struct {
-		tarName string
-		content []byte
-	}{
-		{"Dockerfile", ComposeDockerfile(embeddedBatteries)},
+// runtimeLayerFiles are the script/config files the runtime layer COPYs into the
+// image. Every build whose Dockerfile ends in the runtime layer — the base image
+// AND every assembled custom-base profile image — must ship these in its context,
+// or the layer's COPY instructions fail. Single-sourced here so the two callers
+// cannot drift.
+func runtimeLayerFiles() []contextFile {
+	return []contextFile{
 		{"entrypoint.sh", embeddedEntrypoint},
 		{"entrypoint.py", embeddedEntrypointPy},
 		{"firewall.py", embeddedFirewallPy},
@@ -251,6 +253,17 @@ func createBuildContext() (io.Reader, error) {
 		{"yoloai-resume", embeddedYoloaiResume},
 		{"tmux.conf", embeddedTmuxConf},
 	}
+}
+
+// createBuildContext creates an in-memory tar archive containing the
+// embedded Dockerfile and entrypoints.
+func createBuildContext() (io.Reader, error) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+
+	files := append([]contextFile{
+		{"Dockerfile", ComposeDockerfile(embeddedBatteries)},
+	}, runtimeLayerFiles()...)
 
 	for _, f := range files {
 		header := &tar.Header{
@@ -283,8 +296,16 @@ func createBuildContext() (io.Reader, error) {
 // image per Dockerfile step and makes `system prune` churn forever (see
 // backend-idiosyncrasies.md). BuildKit also supplies the `--secret` plumbing
 // for profiles that need build secrets.
-func (r *Runtime) BuildProfileImage(ctx context.Context, sourceDir string, tag string, secrets []string, buildEnv config.Layout, output io.Writer, logger *slog.Logger) error {
-	buildCtx, err := createProfileBuildContext(sourceDir)
+func (r *Runtime) BuildProfileImage(ctx context.Context, sourceDir string, tag string, custom *config.CustomBaseBuild, secrets []string, buildEnv config.Layout, output io.Writer, logger *slog.Logger) error {
+	var override []byte
+	if custom != nil {
+		var err error
+		override, err = assembleCustomBase(sourceDir, custom)
+		if err != nil {
+			return fmt.Errorf("assemble custom-base Dockerfile: %w", err)
+		}
+	}
+	buildCtx, err := createProfileBuildContext(sourceDir, override)
 	if err != nil {
 		return fmt.Errorf("create profile build context: %w", err)
 	}
@@ -317,8 +338,8 @@ func (r *Runtime) BuildProfileImage(ctx context.Context, sourceDir string, tag s
 // ProfileImageNeedsBuild returns true if the profile image needs to be
 // (re)built. Checks: no checksum file, profile Dockerfile changed, or
 // parent profile was rebuilt more recently.
-func (r *Runtime) ProfileImageNeedsBuild(profileDir string, parentDir string) bool {
-	current := profileBuildChecksum(profileDir)
+func (r *Runtime) ProfileImageNeedsBuild(profileDir string, custom *config.CustomBaseBuild, parentDir string) bool {
+	current := profileBuildChecksum(profileDir, custom)
 	if current == "" {
 		return true
 	}
@@ -347,33 +368,75 @@ func (r *Runtime) ProfileImageNeedsBuild(profileDir string, parentDir string) bo
 
 // RecordProfileBuildChecksum writes the current Dockerfile checksum to disk
 // for staleness detection.
-func (r *Runtime) RecordProfileBuildChecksum(profileDir string) {
-	if sum := profileBuildChecksum(profileDir); sum != "" {
+func (r *Runtime) RecordProfileBuildChecksum(profileDir string, custom *config.CustomBaseBuild) {
+	if sum := profileBuildChecksum(profileDir, custom); sum != "" {
 		_ = fileutil.WriteFile(filepath.Join(profileDir, lastBuildFile), []byte(sum), 0600)
 	}
 }
 
-// profileBuildChecksum computes a SHA-256 of the profile's Dockerfile.
-func profileBuildChecksum(profileDir string) string {
+// profileBuildChecksum computes a SHA-256 of the profile's build inputs.
+//
+// For the default base it hashes the on-disk Dockerfile alone, as before. For a
+// custom base it hashes the *assembled* Dockerfile — which already folds in the
+// base ref, the profile's stack additions, the generated agent installs, and the
+// embedded runtime layer — so editing base:, agents:, or the runtime layer all
+// change the checksum and force a rebuild. (config.yaml is excluded from the
+// build context, so without this those edits would silently not rebuild.)
+//
+// One gap remains for base: image:<ref>: a moving remote tag is not tracked until
+// the image is re-pulled; --rebuild forces it. Filed in findings-unresolved.md.
+func profileBuildChecksum(profileDir string, custom *config.CustomBaseBuild) string {
+	h := sha256.New()
+	if custom != nil {
+		assembled, err := assembleCustomBase(profileDir, custom)
+		if err != nil {
+			return "" // forces a rebuild attempt, which surfaces the real error
+		}
+		h.Write([]byte("custom-base\x00"))
+		h.Write(assembled)
+		return hex.EncodeToString(h.Sum(nil))
+	}
 	data, err := os.ReadFile(filepath.Join(profileDir, "Dockerfile")) //nolint:gosec // G304: profileDir is from profile resolution
 	if err != nil {
 		return ""
 	}
-	h := sha256.New()
 	h.Write([]byte("Dockerfile"))
 	h.Write(data)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// createProfileBuildContext creates a tar archive from all files in the profile
-// directory for Docker build context.
-func createProfileBuildContext(sourceDir string) (io.Reader, error) {
+// createProfileBuildContext creates a tar archive from the files in the profile
+// directory for a Docker build context.
+//
+// dockerfileOverride selects the mode. When nil (default base), the profile's
+// on-disk Dockerfile is used as-is and no other files are injected — today's
+// behaviour. When non-nil (custom base), it is the assembled Dockerfile: the
+// profile's own Dockerfile is dropped from the context (its FROM-less stack was
+// already folded into the assembly), the override is written as "Dockerfile", and
+// the runtime-layer script files are injected because the appended runtime layer
+// COPYs them.
+func createProfileBuildContext(sourceDir string, dockerfileOverride []byte) (io.Reader, error) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
+
+	custom := dockerfileOverride != nil
 
 	entries, err := os.ReadDir(sourceDir)
 	if err != nil {
 		return nil, fmt.Errorf("read profile dir: %w", err)
+	}
+
+	written := map[string]bool{}
+	writeFile := func(name string, content []byte) error {
+		header := &tar.Header{Name: name, Size: int64(len(content)), Mode: 0644, ModTime: time.Now()}
+		if err := tw.WriteHeader(header); err != nil {
+			return fmt.Errorf("write tar header for %s: %w", name, err)
+		}
+		if _, err := tw.Write(content); err != nil {
+			return fmt.Errorf("write tar content for %s: %w", name, err)
+		}
+		written[name] = true
+		return nil
 	}
 
 	for _, e := range entries {
@@ -385,24 +448,34 @@ func createProfileBuildContext(sourceDir string) (io.Reader, error) {
 		if name == lastBuildFile || name == "config.yaml" {
 			continue
 		}
+		// In custom-base mode the on-disk Dockerfile is the FROM-less stack half,
+		// already folded into the override; skip it so the override wins.
+		if custom && name == profileDockerfileName {
+			continue
+		}
 
-		path := filepath.Join(sourceDir, name)
-		content, readErr := os.ReadFile(path) //nolint:gosec // G304: sourceDir is from profile resolution
+		content, readErr := os.ReadFile(filepath.Join(sourceDir, name)) //nolint:gosec // G304: sourceDir is from profile resolution
 		if readErr != nil {
 			return nil, fmt.Errorf("read %s: %w", name, readErr)
 		}
+		if err := writeFile(name, content); err != nil {
+			return nil, err
+		}
+	}
 
-		header := &tar.Header{
-			Name:    name,
-			Size:    int64(len(content)),
-			Mode:    0644,
-			ModTime: time.Now(),
+	if custom {
+		if err := writeFile(profileDockerfileName, dockerfileOverride); err != nil {
+			return nil, err
 		}
-		if err := tw.WriteHeader(header); err != nil {
-			return nil, fmt.Errorf("write tar header for %s: %w", name, err)
-		}
-		if _, err := tw.Write(content); err != nil {
-			return nil, fmt.Errorf("write tar content for %s: %w", name, err)
+		// The appended runtime layer COPYs these; a user file of the same name
+		// already written wins (it was theirs to override).
+		for _, f := range runtimeLayerFiles() {
+			if written[f.tarName] {
+				continue
+			}
+			if err := writeFile(f.tarName, f.content); err != nil {
+				return nil, err
+			}
 		}
 	}
 

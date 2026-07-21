@@ -85,7 +85,7 @@ func TestCreateProfileBuildContext(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("agent: claude"), 0600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "profile.yaml"), []byte("extends: base"), 0600))
 
-	reader, err := createProfileBuildContext(dir)
+	reader, err := createProfileBuildContext(dir, nil)
 	require.NoError(t, err)
 
 	tr := tar.NewReader(reader)
@@ -137,7 +137,7 @@ func TestProfileBuildChecksum_ValidDockerfile(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM yoloai-base\nRUN apt install -y go"), 0600))
 
-	sum := profileBuildChecksum(dir)
+	sum := profileBuildChecksum(dir, nil)
 	assert.NotEmpty(t, sum)
 	assert.Len(t, sum, 64, "expected SHA-256 hex string (64 chars)")
 }
@@ -146,15 +146,15 @@ func TestProfileBuildChecksum_Deterministic(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM yoloai-base"), 0600))
 
-	sum1 := profileBuildChecksum(dir)
-	sum2 := profileBuildChecksum(dir)
+	sum1 := profileBuildChecksum(dir, nil)
+	sum2 := profileBuildChecksum(dir, nil)
 	assert.Equal(t, sum1, sum2)
 	assert.NotEmpty(t, sum1)
 }
 
 func TestProfileBuildChecksum_MissingDockerfile(t *testing.T) {
 	dir := t.TempDir()
-	sum := profileBuildChecksum(dir)
+	sum := profileBuildChecksum(dir, nil)
 	assert.Empty(t, sum)
 }
 

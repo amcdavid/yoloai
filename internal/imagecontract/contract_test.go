@@ -1,3 +1,6 @@
+// ABOUTME: Tests for the image contract and its probe — requirement sets, probe
+// ABOUTME: script generation, parsing, and shell-injection safety under a real sh.
+
 package imagecontract
 
 import (
