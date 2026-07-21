@@ -41,7 +41,7 @@ decisions). For the code-architecture altitude, see [`../architecture/`](../arch
 
 Each topic has a four-file lifecycle: an active inbox (`unresolved-`) draining to one of three
 sinks — `resolved-` (done), `deferred-` (parked with a **`Trigger:`**), or `abandoned-`
-(dropped with a **`Why:`**). See the [project CLAUDE.md](../../../CLAUDE.md) "Doc conventions"
+(dropped with a **`Why:`**). See the [project AGENTS.md](../../../AGENTS.md) "Doc conventions"
 note for the full model.
 
 | Topic | Active | Sinks |
