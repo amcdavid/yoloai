@@ -8,6 +8,31 @@ import (
 	"strings"
 )
 
+// MinifyDockerfile strips whole-line comments and blank lines from Dockerfile
+// bytes, leaving every instruction verbatim. It exists for the Apple `container`
+// builder, which rejects a Dockerfile larger than 16 KB (apple/container#735) —
+// yoloAI's composed base is ~19 KB, over half of it comments, so removing them
+// brings it comfortably under the cap without changing the built image.
+//
+// This is safe only because yoloAI's embedded Dockerfiles use no heredocs (a `#`
+// inside a `RUN <<EOF` would be shell, not a Dockerfile comment) and put comments
+// on their own lines: Dockerfile treats `#` as a comment only at the start of a
+// line (after optional whitespace), so a `#` inside a RUN command is untouched.
+// Docker/Podman build from the full tar context and keep their comments; only the
+// apple path minifies.
+func MinifyDockerfile(data []byte) []byte {
+	lines := strings.Split(string(data), "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return []byte(strings.Join(kept, "\n") + "\n")
+}
+
 // composeSeparator introduces the appended layer in the composed output. Build
 // logs and `docker history` show the composed file, not its two sources, so the
 // boundary is marked to keep a reader from hunting for a `runtime-layer` file
