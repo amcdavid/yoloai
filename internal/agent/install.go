@@ -21,17 +21,13 @@ const nodeMajor = "20"
 // is absent and the build fails loudly, which is the documented foreign-base
 // policy (a detection matrix would only pretend to support untested userlands).
 //
-// It installs its own prerequisites first (ca-certificates, curl, gnupg): a
-// foreign base can't be assumed to ship them — a real R/Bioconductor image, for
-// instance, has curl but no gpg, which otherwise fails the NodeSource key import
-// with "gpg: not found". apt-get is idempotent, so a base that already has them
-// pays only a metadata refresh.
+// Its prerequisites (curl, gnupg, ca-certificates) are installed by prereqStep,
+// emitted ahead of every agent install — not here — so aider (uv/curl) gets them
+// too when it is the only selected agent.
 const nodeInstallStep = `# Node.js ` + nodeMajor + ` — shared prerequisite for npm-based agents, installed once.
 # Guarded: a base that already ships npm (e.g. yoloai-minimal) skips this entirely.
 RUN command -v npm >/dev/null 2>&1 || ( \
-      apt-get update \
-      && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
-      && mkdir -p /etc/apt/keyrings \
+      mkdir -p /etc/apt/keyrings \
       && curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
          | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
       && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_` + nodeMajor + `.x nodistro main" \
@@ -39,6 +35,26 @@ RUN command -v npm >/dev/null 2>&1 || ( \
       && apt-get update \
       && apt-get install -y --no-install-recommends nodejs \
       && rm -rf /var/lib/apt/lists/* )`
+
+// prereqStep installs the base tooling every agent install below relies on. A
+// foreign base (base: image:<ref>) can't be assumed to ship it — a real
+// R/Bioconductor image has curl but no gpg, and a lean base may have neither — so
+// this bootstraps them once, before Node's NodeSource key import (needs curl +
+// gnupg) and aider's uv installer (needs curl). ca-certificates covers the HTTPS
+// fetches. gnupg is included only when an npm agent is selected (it is what needs
+// the key import); apt-get is idempotent, so a base that already has these pays
+// only a metadata refresh. On a non-Debian base apt-get is absent and the build
+// fails loudly — the documented foreign-base policy.
+func prereqStep(withGnupg bool) string {
+	pkgs := "ca-certificates curl"
+	if withGnupg {
+		pkgs += " gnupg"
+	}
+	return "# base tooling the agent installs below need (a foreign base may lack it)\n" +
+		"RUN apt-get update \\\n" +
+		"      && apt-get install -y --no-install-recommends " + pkgs + " \\\n" +
+		"      && rm -rf /var/lib/apt/lists/*"
+}
 
 // InstallDockerfile renders the Dockerfile fragment that installs the given
 // agents' CLIs into an assembled custom-base image. Each name must be a known
@@ -75,6 +91,8 @@ func InstallDockerfile(names []string) (string, error) {
 
 	var b strings.Builder
 	b.WriteString("# --- agent CLIs (yoloAI-generated; versions unpinned, agents track live APIs) ---")
+	b.WriteString("\n")
+	b.WriteString(prereqStep(len(npmPkgs) > 0))
 	if len(npmPkgs) > 0 {
 		b.WriteString("\n")
 		b.WriteString(nodeInstallStep)

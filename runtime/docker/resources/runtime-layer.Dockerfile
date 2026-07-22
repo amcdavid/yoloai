@@ -29,6 +29,12 @@
 # iptables is here rather than gated behind --network-isolated because
 # firewall.py fails closed without it: an isolated sandbox on an image lacking
 # iptables refuses to start, which is a worse trade than 10 MB.
+#
+# curl is installed even though this layer is the only thing that uses it (the
+# gosu download below): yoloai-base and yoloai-minimal already ship it, but a
+# foreign base (base: image:<ref>) may not, and without it the gosu step fails
+# with "curl: not found". Installing it here makes the layer self-sufficient on
+# any Debian/Ubuntu base, matching the layer's cherry-pickable contract.
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tmux \
@@ -39,6 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iptables \
     ipset \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # --- gosu --------------------------------------------------------------------
