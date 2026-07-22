@@ -54,6 +54,34 @@ func TestInstallDockerfileNonNPMAgentNoNode(t *testing.T) {
 	if !strings.Contains(got, "uv tool install --python 3.12 aider-chat") {
 		t.Errorf("missing aider install:\n%s", got)
 	}
+	// aider needs curl for its uv installer; the prereq step must bootstrap it
+	// even though there's no npm agent. gnupg (only the Node key needs it) must
+	// NOT be installed for an aider-only base.
+	if !strings.Contains(got, "install -y --no-install-recommends ca-certificates curl \\") {
+		t.Errorf("aider-only must still bootstrap ca-certificates+curl:\n%s", got)
+	}
+	if strings.Contains(got, "gnupg") {
+		t.Errorf("aider-only must not install gnupg (only the Node key import needs it):\n%s", got)
+	}
+}
+
+func TestInstallDockerfilePrereqBootstrapsTooling(t *testing.T) {
+	// An npm agent needs curl + gnupg (NodeSource key import) + ca-certificates,
+	// bootstrapped before the guarded Node install, so a foreign base lacking gpg
+	// (a real R/Bioconductor image) does not fail with "gpg: not found".
+	got, err := InstallDockerfile([]string{"claude"})
+	if err != nil {
+		t.Fatalf("InstallDockerfile: %v", err)
+	}
+	if !strings.Contains(got, "ca-certificates curl gnupg") {
+		t.Errorf("npm agent must bootstrap ca-certificates+curl+gnupg:\n%s", got)
+	}
+	// The prereq apt step must come before the Node install that uses gpg.
+	prereq := strings.Index(got, "apt-get install -y --no-install-recommends ca-certificates")
+	node := strings.Index(got, "command -v npm")
+	if prereq < 0 || node < 0 || prereq > node {
+		t.Errorf("prereq step must precede the Node install (prereq=%d node=%d):\n%s", prereq, node, got)
+	}
 }
 
 func TestInstallDockerfileMixed(t *testing.T) {
