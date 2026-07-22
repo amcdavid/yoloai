@@ -20,10 +20,18 @@ const nodeMajor = "20"
 // the NodeSource one from the batteries Dockerfile; on a non-Debian base apt-get
 // is absent and the build fails loudly, which is the documented foreign-base
 // policy (a detection matrix would only pretend to support untested userlands).
+//
+// It installs its own prerequisites first (ca-certificates, curl, gnupg): a
+// foreign base can't be assumed to ship them — a real R/Bioconductor image, for
+// instance, has curl but no gpg, which otherwise fails the NodeSource key import
+// with "gpg: not found". apt-get is idempotent, so a base that already has them
+// pays only a metadata refresh.
 const nodeInstallStep = `# Node.js ` + nodeMajor + ` — shared prerequisite for npm-based agents, installed once.
 # Guarded: a base that already ships npm (e.g. yoloai-minimal) skips this entirely.
 RUN command -v npm >/dev/null 2>&1 || ( \
-      mkdir -p /etc/apt/keyrings \
+      apt-get update \
+      && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+      && mkdir -p /etc/apt/keyrings \
       && curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
          | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
       && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_` + nodeMajor + `.x nodistro main" \
