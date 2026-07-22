@@ -1,3 +1,6 @@
+// ABOUTME: Tests for ComposeDockerfile — that the runtime layer appends cleanly,
+// ABOUTME: stays single-stage, and ends in the runtime layer's ENTRYPOINT.
+
 package docker
 
 import (
