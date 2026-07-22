@@ -12,12 +12,14 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	goruntime "runtime"
 	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/kstenerud/yoloai/internal/config"
+	"github.com/kstenerud/yoloai/internal/fileutil"
 	"github.com/kstenerud/yoloai/internal/sysexec"
 	"github.com/kstenerud/yoloai/runtime"
 	dockerrt "github.com/kstenerud/yoloai/runtime/docker"
@@ -437,6 +439,24 @@ func (r *Runtime) imageExists(ctx context.Context, ref string) bool {
 	return err == nil
 }
 
+// minifyContextDockerfile rewrites the Dockerfile in a materialized apple build
+// context, stripping comments and blank lines so it fits under `container
+// build`'s 16 KB Dockerfile limit (apple/container#735). yoloAI's composed base
+// is ~19 KB, over half comments; the docker/podman backends build from a tar
+// context with no such limit and keep their comments. No-op-safe if the file is
+// already small.
+func minifyContextDockerfile(dir string) error {
+	path := filepath.Join(dir, "Dockerfile")
+	data, err := os.ReadFile(path) //nolint:gosec // G304: dir is a runtime-created temp build dir
+	if err != nil {
+		return fmt.Errorf("read build context Dockerfile: %w", err)
+	}
+	if err := fileutil.WriteFile(path, dockerrt.MinifyDockerfile(data), 0644); err != nil { //nolint:gosec // G306: build-context file in a caller-owned temp dir
+		return fmt.Errorf("minify build context Dockerfile: %w", err)
+	}
+	return nil
+}
+
 // buildBaseImage materializes the shared build context into a temp directory and
 // builds yoloai-base via `container build`. The context path is **absolute** — a
 // relative `.` silently transfers an empty context and every COPY fails (AC1).
@@ -451,6 +471,9 @@ func (r *Runtime) buildBaseImage(ctx context.Context, layout config.Layout, outp
 
 	if err := dockerrt.WriteBuildContextDir(dir); err != nil {
 		return fmt.Errorf("write build context: %w", err)
+	}
+	if err := minifyContextDockerfile(dir); err != nil {
+		return err
 	}
 	logger.Debug("building yoloai-base via container build", "context", dir)
 
