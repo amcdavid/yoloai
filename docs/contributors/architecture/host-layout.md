@@ -78,3 +78,31 @@ library/
 └── cache/                   # Global cache directory (e.g., overlay detection, base image checksum)
 ```
 
+
+## Build-staleness markers are keyed by backend
+
+Several paths above cache a "have I already built this?" checksum next to the thing it
+describes — the global `cache/` base-image marker, and a `.last-build-checksum` in each profile
+directory. **These markers must be keyed by the backend that wrote them**, because the artifact
+they vouch for is not shared: docker, podman, containerd and apple each keep their own image
+store, so a marker written by one backend answers a question about an image another backend does
+not have.
+
+Both do this today: `baseImageChecksumPath(layout, backendKey)` for the base image (DF56) and
+`profileChecksumPath(profileDir, backendKey)` for profile images (DF150). The profile marker was
+unqualified until 2026-07-27, and the failure was neither hypothetical nor rare — build a profile
+under docker, run it under `--backend podman`, and podman skipped a build whose image it did not
+have, then failed pulling a local-only tag. It failed in both directions, on any host with two
+container backends.
+
+The invariant generalizes past checksums: **any host-side marker that stands in for a
+backend-managed artifact is keyed by backend, or it is a lie for every other backend.**
+
+**And the key is a backend *name*, which is a proxy for a store rather than the store itself.**
+Where one name means one store — apple, containerd — the proxy is exact. The docker backend can
+be pointed at OrbStack, Docker Desktop or Colima, so it is not: `"docker"` names three possible
+stores. The base image handles this by not relying on a host-side marker at all, stamping the
+checksum onto the image (`baseChecksumLabel`) so staleness travels with the image into whatever
+store holds it. **When the artifact can carry its own staleness, that beats any host-side
+marker** — the marker is what you use when it cannot. The profile path cannot yet, and that gap is
+[DF152](../design/findings-unresolved.md).

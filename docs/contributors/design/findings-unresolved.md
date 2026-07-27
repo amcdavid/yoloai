@@ -28,6 +28,28 @@ is worse than none because it also supplies the confidence.
 
 ## Findings
 
+### DF152 — profile-image staleness cannot travel with the image, because the interface takes neither a context nor a tag
+
+- **Discovered:** 2026-07-27 · **Workstream:** DF150 fix
+- **Severity:** LOW–MEDIUM (same failure shape as DF150 — a skipped build then a pull of a local-only tag — but confined to one backend with more than one daemon configured, rather than any host with two backends)
+- **Disposition:** PARKED
+- **Description:** DF150 keyed the profile build marker by backend name. That is exact only where one backend name means one store, and the **docker backend is not** — it can be pointed at OrbStack, Docker Desktop or Colima, each a separate image store, and a host-side marker keyed `"docker"` cannot tell them apart. Switch daemons and the marker still says "built", so the build is skipped and the run fails pulling a tag the new store has never seen. **This is not a new discovery so much as an unfinished one:** `baseImageChecksumPath`'s comment (`runtime/docker/build.go`) already states the whole problem and names the remedy — the base image stamps its checksum onto the image itself (`baseChecksumLabel`) and reads it back via `baseImageStale`, so staleness travels with the image, in whatever store holds it. The base path is right; the profile path is the one that never got there.
+- **Why DF150 stopped short:** the remedy needs to inspect an image, and `ProfileImageNeedsBuild(profileDir, parentDir string) bool` has neither a `ctx` nor the tag. Closing this changes the `runtime.ProfileImageBuilder` interface — which PR #44 is implementing as of this writing, so changing it now would turn that contributor's rebase into a rewrite. Deliberately deferred on those grounds, not on merit.
+- **Fix sketch:** give `ProfileImageNeedsBuild` a `ctx` and the resolved tag, then mirror the base-image split — label-based staleness for docker/podman (multi-daemon capable), host-side keyed marker for backends that are genuinely one store per name (apple, containerd). The label constant and the `checksumLabelStale` helper already exist and generalize with a parameterized label name.
+- **Trigger:** PR #44 landing (the interface is then free to move), or any report of a profile image rebuilding-or-not wrongly after a Docker daemon switch.
+- **Pointer:** `runtime/docker/build.go` (`profileChecksumPath` — the caveat is stated in its doc comment; `baseImageChecksumPath`, `baseChecksumLabel`, `checksumLabelStale`, `baseImageStale`); `runtime/runtime_optional.go` (`ProfileImageBuilder`). Resolved sibling: [DF150](findings-resolved.md).
+
+### DF151 — the documentation system routes agents to archived plans, and hides its conventions in append-only sinks
+
+- **Discovered:** 2026-07-27 · **Workstream:** PR #44 review (first external contribution)
+- **Severity:** MEDIUM (project infra, not product — but it is the mechanism that is supposed to make external contributions correct, and its first live test failed in four places)
+- **Disposition:** ADDRESSED-IN-PLACE (D128) for the two structural halves; the mechanized gate is PARKED
+- **Description:** PR #44 is the first non-trivial outside submission and therefore the first real execution of the contributor doc system on an agent with no project history. Fifteen review findings; tracing each back to what the docs say produced two structural causes rather than fifteen unrelated slips. **(1) An archived plan was read as a specification.** The contributor's code comment cites `design/plans/apple-container-backend.md`, which rule 8 had moved to `archive/plans/`. That file's line 85 is the source of the pre-D126 image name in *both* doc edits, the AC1 absolute-context reasoning copied into the code comment, and the stale path itself. `archive/README.md` already warned, correctly and in the right words, that nothing there is a live reference — but an agent that greps arrives mid-file and never passes through an index, so every word of the warning was off the path taken. **(2) The two engineering conventions the PR broke lived only in `findings-resolved.md`** — the backend-keyed marker scheme at `:929` and the DF144/DF145 subprocess-diagnostic rule. AGENTS.md classifies the `*-resolved` sinks as append-only archaeology exempt from sweeps, so both conventions were, by the docs' own rules, unreachable. A third contributing fact: **AGENTS.md had no testing rule at all** — rules 1–9 were entirely publishing ritual (breaking changes, name sweeps, commit format, IDs, findings, plans, deprecations), and `CONTRIBUTING.md` explained how to *run* tests without ever saying to write one. The single largest review comment was "the fix's core is untested".
+- **What was done (D128):** every file under `archive/` carries a first-lines `> **ARCHIVED …**` banner (the one carve-out to "frozen means frozen", because a warning is the only edit that cannot imply someone vouched for the contents); AGENTS.md gained rule 10 (a behavior change carries a test that fails when reverted, argv included) and a converse to rule 7 (a fix that establishes a convention graduates it out of the finding into `standards/`/`architecture/`/the interface docstring); the two orphaned conventions were backfilled; `ProfileImageBuilder` moved to `runtime/runtime_optional.go` so backends can compile-assert it; and the live pre-D126 name drift in `design/plans/shared-cache-volumes.md` was fixed.
+- **What remains parked:** a **dead-name gate**, built like `scripts/check_breaking_changes.py` — which already argues its own design in its docstring: run on the branch where the entry is owed, compare tree-wide *sets* rather than reading the diff (so a name that merely moves is a non-event), and accept that "a partial gate on the recurring case beats no gate on all of them". Here the recurring case is a doc showing a yoloai-generated name without its principal segment. The truth is `config.InstancePrefix` (`internal/config/names.go`), which returns `"yoloai-" + principal + "-"` and **panics on the empty principal** — asserted by `TestInstancePrefix` in `names_test.go`. So there is no unscoped form the code can emit, which makes any `yoloai-<x>` in a non-exempt doc with no principal segment provably dead rather than a judgement call — the property a gate needs. (`ProfileImageTag` itself lives in `internal/config/profile.go` and composes `InstancePrefix`; the prefix is the thing worth gating.) This finding's own evidence is the argument for building it: the pre-D126 `yoloai-<profile>` form survived D126's rule-2 sweep in a *live* plan file, so an outside agent could have gotten the name wrong without ever touching the archive. Rule 2 is enforced by attention, and attention already missed it once.
+- **Also unaddressed, deliberately:** several review findings are not preventable by any document — "extract the shared scheme rather than shadowing it", "this test's name does not match what it asserts", "this test pins the defect as intended behavior". Those are review-caught, and review catching them is the system working. Do not respond to this finding by trying to write a rule for each of the fifteen.
+- **Pointer:** https://github.com/kstenerud/yoloai/pull/44 (13 inline comments + review body); `docs/contributors/archive/plans/apple-container-backend.md:85` (the line read as spec); `docs/contributors/design/findings-resolved.md:929`; `docs/contributors/decisions/working-notes.md` (D128).
+
 ### DF82 — Credential broker (D105/D106) is architecturally general but only wired for the Claude agent
 
 - **Discovered:** 2026-07-14 · **Workstream:** sandboxing-blog research (gap analysis). **Updated 2026-07-14:** Gemini + Codex wired (D115); single-provider generalization done. Aider + OpenCode remain (multi-provider).
@@ -491,10 +513,12 @@ is worse than none because it also supplies the confidence.
 - **Discovered:** 2026-07-17 · **Workstream:** pre-release data-destruction audit (copy/diff/apply host surface)
 - **Severity:** HIGH (security — defeats the review gate that is the product's core safety property), **macOS-only** (tart, seatbelt). Latent: needs a compromised/prompt-injected agent.
 - **Disposition:** FILED, not fixed — needs a design decision, deferred to a macOS agent (owner's call, 2026-07-17). NOT a v0.9.0 blocker.
+- **Reproduced end-to-end (macOS, 2026-07-20):** the chain is now *executed*, not just read. `runtime/seatbelt/df136_repro_test.go` drives the real `GenerateProfile` + `sandbox-exec` — a confined process overwrites `environment.json` with an attacker-chosen `HostPath` — then the real `store.LoadEnvironment` + `git.NewHost().ApplyPatch`, and the patch lands in the redirected dir. A control assertion confirms the *same* profile **denies** a direct write to that dir, so the record's home inside the writable grant is the sole lever. The tart half was reproduced on a booted `yoloai-base` guest during verification and is pinned deterministically by `runtime/tart/df136_repro_test.go` (the `yoloai` VirtioFS share carries no `:ro`, contrasted with a read-only mount that does).
 - **Verified (by me):** the two mount facts. `runtime/tart/tart.go:703` shares the entire sandbox dir into the guest **read-write** (`--dir sharedDir:sandboxPath`, no `:ro`); `sandboxPath` is `SandboxesDir()/name`, the directory `environment.json` lives in. `runtime/seatbelt/profile.go:193` grants `(allow file-read* file-write* (subpath sandboxDir))` over that same directory, at the invoking user's uid. Docker/containerd/apple mount only specific subpaths — not exposed.
 - **The chain (traced by reading, not executed):** `store.LoadEnvironment` (`store/environment.go`) does a bare read+unmarshal with **no integrity check**. `copyflow.ApplyAll`/`ApplySeries` use the record's `Dirs[0].HostPath` **verbatim** as the target of a host-side `git apply` (`git.NewHost`). So an agent inside the confinement can rewrite `environment.json`'s `HostPath` to any path the invoking user can write (`~/.ssh`, another project), stage a matching fake work copy + `BaselineSHA`, and the next `yoloai apply` writes the agent's patch there. It defeats the gate via **raw file I/O, not git**, which is why DF35's hermetic-git-seal verification (git ops only) does not cover it.
 - **Corrects a stale claim:** DF67 asserts *"`.meta` lives outside the sandbox, so the agent can't corrupt it"* — false for this metadata; `environment.json` sits inside the seatbelt grant and the tart share.
 - **Shape of a fix (for the mac agent, not prescriptive):** mount the record read-only / keep it outside the writable share; or sign/verify it; or confirm the resolved apply target against the path recorded at create time before writing. `apply` also only prints its target *after* applying (`internal/cli/workflow/apply.go:364`) — showing it first would surface a redirect.
+- **The reproduction narrows the fix (2026-07-20):** `environment.json` is host-only metadata — **no in-guest code reads or writes it** (traced across every reader/writer; the only guest-side consumers of the sandbox dir are the log/work/files subtrees and `runtime-config.json`). Docker already withholds it by bind-mounting individual `/yoloai/*` subdirs, never the sandbox root — so tart and seatbelt are the two outliers, and the target state is "converge on what Docker already does." That kills the third fix option above: *"confirm the resolved apply target against the recorded path"* is **unsound**, because every in-tree anchor for that comparison (`environment.json` itself, the caret-encoded `work/<EncodePath(hostPath)>` dir name) is *also* inside the agent-writable tree and can be forged in lockstep. The two sound directions are **isolate the metadata** (stop sharing the sandbox root: tart shares only the subtrees the guest needs; seatbelt adds a `(deny file-write* (literal <environment.json>))` to the existing grant) or **sign/verify it** with a host-only key kept outside the share.
 - **Pointer:** `runtime/tart/tart.go:703`; `runtime/seatbelt/profile.go:193`; `store/environment.go` (`LoadEnvironment`, no integrity check); `copyflow/apply.go`; `internal/git/ops.go` (host apply). Related: DF35, DF67.
 
 ### DF137 — plain `yoloai system prune` reclaims non-yoloai content on a shared daemon
@@ -528,6 +552,7 @@ is worse than none because it also supplies the confidence.
 - **Severity:** MEDIUM (can signal an unrelated process group after PID reuse), **macOS-only**
 - **Disposition:** FILED, not fixed — **reported by the audit, not independently verified by me.** Deferred to the macOS agent with DF136.
 - **Description (audit-reported):** `runtime/seatbelt/seatbelt.go:711-753` `killByPID` reads a bare PID from a file and does `syscall.Kill(-pid, SIGTERM)` then `SIGKILL` (process-group kill, since the child ran `Setsid`), with **no** check that the PID still belongs to a process this sandbox launched (no start-time / argv identity). Called from `Stop()` (destroy, `reset --restart`, teardown). If the original `sandbox-exec` died and the OS reused the PID as a new group leader, the unrelated group is killed. Contrast `internal/broker/host.go:341-356`, which signals a single PID and explicitly acknowledges the reuse race.
+- **Confirmed by reading (2026-07-20, on the Mac):** `seatbelt.go:342` sets `SysProcAttr{Setsid: true}`, so the pid file holds a session/group leader (pid == pgid); `killByPID` (`seatbelt.go:711-753`) then sends `syscall.Kill(-pid, …)` group SIGTERM/SIGKILL with **no** re-check that the pid still names this sandbox's process — exactly as the audit reported. The `broker/host.go` contrast (single positive pid, reuse race documented in-comment) holds. A runtime reproduction is not practically achievable: PID reuse onto a new group leader cannot be forced deterministically, so this stays "confirmed by reading."
 - **Pointer:** `runtime/seatbelt/seatbelt.go:711-753`; contrast `internal/broker/host.go:331-356`.
 
 ### DF140 — a sandbox whose agent never came up can report Active / Idle / Done instead of failed
@@ -567,6 +592,79 @@ is worse than none because it also supplies the confidence.
   since the env leak the helper guards against is process-global anyway).
 - **Pointer:** `runtime/runtimetest/conformance_iface.go` (`parallelize`, the non-sharing branch);
   `runtime/apple/integration_test.go` (`appleSetup`); `internal/testutil/home.go:33`.
+
+### DF148 — `runtime-config.json` is guest-writable on tart/seatbelt and the host reads it back post-launch
+
+- **Discovered:** 2026-07-20 · **Workstream:** DF136 solution audit (sandbox-metadata host surface)
+- **Severity:** LOW (security, latent — needs a compromised agent; **same class as DF136** — a host
+  action driven by a guest-writable file — but the concretely-reachable consequences on the two
+  affected backends are low-impact, see the bound below). **tart + seatbelt only.**
+- **Disposition:** PARKED — deferred to [sandbox-share-tiering.md](plans/sandbox-share-tiering.md),
+  which closes it by parking `runtime-config.json` in the read-only tier. Sibling of DF136; not a
+  release blocker. Filed rather than fixed to avoid scope-creeping the DF136 audit (D119).
+- **Verified (by me):** `runtime-config.json` sits at the sandbox-dir root, inside the *same* coarse
+  guest-writable share as `environment.json` (the DF136 root cause), so a confined agent can rewrite
+  it. Docker mounts it **read-only** as a single-file bind (`internal/orchestrator/mounts/mounts.go:215-219`);
+  tart and seatbelt expose it read-write — the same tart/seatbelt-vs-Docker asymmetry as DF136. The
+  host reads it back **after the guest is up** in three places: `Engine.sandboxIsolation`
+  (`internal/orchestrator/engine_network.go:84`) parses the `isolation` field to choose the
+  firewall-patch strategy (`UsesSidecarFirewall`, `engine_network.go:62`); seatbelt
+  `buildExecCommand` (`runtime/seatbelt/seatbelt.go:827-831`) reads `working_dir` on **every Exec**
+  to set the host command's cwd; and restart pulls `TmuxConf` from it (`internal/orchestrator/lifecycle/restart.go:163`).
+- **The bound that makes it LOW (verified):** restart is **defensively written** — it re-derives the
+  security-critical fields (`workdir`, network policy via `netpolicycfg.Load`, `Isolation`, `Setup`)
+  from the trusted `Environment` record and the separate netpolicy file, **not** from
+  `runtime-config.json` (`restart.go:180-208`). So the dangerous schema fields (`AllowedDomains`,
+  `SetupCommands`, `AgentCommand`) are **not** re-read from the guest-writable file on the host.
+  Further, the highest-impact residual consumer — `sandboxIsolation` → sidecar-firewall selection —
+  is a network-isolation mechanism whose macOS applicability is itself deferred
+  (see [tamper-resistant-network-isolation.md](plans/tamper-resistant-network-isolation.md) Scope),
+  i.e. it matters mainly on backends where this file is *already read-only*. On tart/seatbelt the
+  concretely-reachable residual is `working_dir`→host cwd (still inside the profile confinement) and
+  `TmuxConf` (tmux config injection) — both low.
+- **The check that would settle worst-case severity:** trace whether **any** high-impact consumer of
+  `runtime-config.json` (isolation-mode selection, or any field feeding a host privilege/network
+  decision) actually runs on tart or seatbelt *after* the guest could have tampered. If none does,
+  LOW is right; if `sandboxIsolation`'s strategy pick can weaken a tart/seatbelt sandbox's own
+  egress, this rises to MEDIUM. Not run — deferred with the finding.
+- **Pointer:** `internal/orchestrator/mounts/mounts.go:215-219` (Docker ro bind); `runtime/tart/tart.go:708`
+  + `runtime/seatbelt/profile.go:193-199` (the rw share/grant); `internal/orchestrator/engine_network.go:62,84`;
+  `runtime/seatbelt/seatbelt.go:827-831`; `internal/orchestrator/lifecycle/restart.go:163,180-208`. Related: DF136.
+
+### DF153 — containerd is image-based but does not implement `ProfileImageBuilder`, so profile Dockerfiles are silently skipped there too
+
+- **Discovered:** 2026-07-27 · **Workstream:** PR #44 review (first external contribution)
+- **Severity:** MEDIUM (silent skip — a profile with a Dockerfile builds nothing and every sandbox
+  on that profile runs `yoloai-base` unmodified, with no error). Same class as the pre-fix apple
+  defect this PR closes, and the same class DF150/DF152 cover for the backends that do implement
+  the interface.
+- **Disposition:** FILED, not fixed — explicitly out of scope for this PR per the owner's review.
+- **Description:** `runtime.ProfileImageBuilder` (`runtime/runtime_optional.go`) is implemented by
+  docker, podman (via embedding), and now apple. containerd has its own OCI image store — the same
+  shape of backend docker/podman/apple are — but declares no
+  `var _ runtime.ProfileImageBuilder = (*Runtime)(nil)` and has no `BuildProfileImage`/
+  `ProfileImageNeedsBuild`/`RecordProfileBuildChecksum` methods at all. `ProfileImageBuilderOf`
+  (`runtime_optional.go`) falls through its `ok` branch for containerd exactly as it did for apple
+  before this PR, so a profile's Dockerfile is silently ignored rather than built.
+- **Root cause, and why the interface being back in `runtime_optional.go` matters:**
+  `ProfileImageBuilder` used to live in `internal/orchestrator/profiles`, where no backend in the
+  public runtime tree could compile-time assert it — that's how apple came to be missing it
+  unnoticed, and it's why containerd is missing it unnoticed now. Every other optional capability
+  lives in `runtime/runtime_optional.go` with the `var _ runtime.CachePruner = (*Runtime)(nil)`
+  idiom (`runtime/podman/podman.go:101`); moving `ProfileImageBuilder` there (done in this PR's
+  rebase, DF151) doesn't retrofit a missing assertion into containerd — that stays a per-backend
+  choice — but it does mean the next audit of "which backends assert which optional interfaces"
+  will actually surface the gap instead of it hiding behind a package nothing sweeps.
+- **Remedy sketch:** implement `BuildProfileImage`/`ProfileImageNeedsBuild`/
+  `RecordProfileBuildChecksum` on `runtime/containerd.Runtime`, keyed by backend `"containerd"`
+  through the shared `docker.ProfileImageNeedsBuild`/`docker.RecordProfileBuildChecksum` scheme
+  (DF150), and add the compile-time assertion. containerd's `CreateBuildContext`/build-context
+  materialization needs the same absolute-directory care apple's fix pinned (AC1) if containerd's
+  build command takes a directory context rather than a stdin tar.
+- **Pointer:** `runtime/runtime_optional.go` (`ProfileImageBuilder`, `ProfileImageBuilderOf`);
+  `runtime/containerd/containerd.go:106-111` (missing assertion); `runtime/docker/build.go`
+  (`ProfileImageNeedsBuild`, `RecordProfileBuildChecksum`, the shared scheme to reuse); `runtime/apple/apple.go`
+  (the sibling fix this PR made for apple). Related: DF150, DF151, DF152.
 
 ## Policy origin
 

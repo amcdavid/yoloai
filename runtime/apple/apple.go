@@ -30,7 +30,7 @@ import (
 // minMacOSMajor is the lowest macOS major version we allow. Apple `container`
 // technically runs on macOS 15 with limitations (no container-to-container net,
 // no `container network`, IP conflicts), so we gate strictly on 26 (Tahoe) as a
-// safe over-gate. See docs/contributors/design/plans/apple-container-backend.md (AC14).
+// safe over-gate. See docs/contributors/archive/plans/apple-container-backend.md (AC14).
 const minMacOSMajor = 26
 
 // containerBin is the CLI we shell out to.
@@ -133,6 +133,7 @@ type Runtime struct {
 var _ runtime.Backend = (*Runtime)(nil)
 var _ runtime.InteractiveSession = (*Runtime)(nil)
 var _ runtime.GitExecer = (*Runtime)(nil)
+var _ runtime.ProfileImageBuilder = (*Runtime)(nil)
 
 // New constructs the apple Runtime after verifying platform, the CLI, and the
 // macOS version gate. The apiserver is not started here — Setup does that on
@@ -496,7 +497,7 @@ func (r *Runtime) buildBaseImage(ctx context.Context, layout config.Layout, outp
 }
 
 // BuildProfileImage builds a profile's Dockerfile via `container build`,
-// following the shape planned in docs/contributors/design/plans/apple-container-backend.md
+// following the shape planned in docs/contributors/archive/plans/apple-container-backend.md
 // ("reuses the existing Dockerfile/profile images unchanged"). Like
 // buildBaseImage, the context is materialized into an absolute temp dir —
 // `container build .` silently drops a relative context (AC1) — reusing the
@@ -526,25 +527,34 @@ func (r *Runtime) BuildProfileImage(ctx context.Context, sourceDir string, tag s
 	}
 	logger.Debug("building profile image via container build", "tag", tag, "sourceDir", sourceDir, "context", dir)
 
-	cmd := sysexec.CommandContext(ctx, r.execEnv, r.containerBin, "build", "-t", tag, dir)
-	cmd.Stdout = output
-	cmd.Stderr = output
+	cmd := sysexec.CommandContext(ctx, buildEnv.Env().EnvForAppleContainer(), r.containerBin, "build", "-t", tag, dir)
+	// Stream to output as before, but also tee into a tail buffer so a failure's
+	// actionable cause rides on the error itself, not only the (maybe discarded)
+	// stream — same value on both so os/exec keeps its single-pipe path (DF145).
+	tail := sysexec.NewTailBuffer(buildErrorTailLines)
+	w := io.MultiWriter(output, tail)
+	cmd.Stdout = w
+	cmd.Stderr = w
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("container build: %w", err)
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
+			return fmt.Errorf("container build exited with code %d%s", exitErr.ExitCode(), tail.ErrorSuffix())
+		}
+		return fmt.Errorf("container build: %w%s", err, tail.ErrorSuffix())
 	}
 	return nil
 }
 
 // ProfileImageNeedsBuild reports whether the profile image is stale. Delegates
-// to the docker backend's checksum scheme (pure file I/O, backend-agnostic).
+// to the docker backend's checksum scheme, keyed to apple's own store (DF150).
 func (r *Runtime) ProfileImageNeedsBuild(profileDir string, custom *config.CustomBaseBuild, parentDir string) bool {
-	return dockerrt.ProfileImageNeedsBuild(profileDir, custom, parentDir)
+	return dockerrt.ProfileImageNeedsBuild(profileDir, custom, parentDir, "apple")
 }
 
 // RecordProfileBuildChecksum records the profile's build-inputs checksum after a
-// successful build. Delegates to the docker backend's checksum scheme.
+// successful build. Delegates to the docker backend's checksum scheme, keyed
+// to apple's own store (DF150).
 func (r *Runtime) RecordProfileBuildChecksum(profileDir string, custom *config.CustomBaseBuild) {
-	dockerrt.RecordProfileBuildChecksum(profileDir, custom)
+	dockerrt.RecordProfileBuildChecksum(profileDir, custom, "apple")
 }
 
 // Prune sweeps orphaned apple containers — `yoloai-*` instances (scoped to this
